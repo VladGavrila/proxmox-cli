@@ -122,3 +122,44 @@ func DeleteContainerSnapshot(ctx context.Context, c *proxmox.Client, ctid int, n
 	}
 	return ct.DeleteSnapshot(ctx, name)
 }
+
+// ShutdownContainer gracefully shuts down a container and returns the resulting task.
+func ShutdownContainer(ctx context.Context, c *proxmox.Client, ctid int, nodeName string) (*proxmox.Task, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return ct.Shutdown(ctx, false, 0)
+}
+
+// DeleteContainer deletes a container and returns the resulting task.
+func DeleteContainer(ctx context.Context, c *proxmox.Client, ctid int, nodeName string) (*proxmox.Task, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return ct.Delete(ctx)
+}
+
+// CloneContainer clones a container to a new ID. If newid is 0, the next available ID is used.
+func CloneContainer(ctx context.Context, c *proxmox.Client, ctid, newid int, nodeName, name string) (int, *proxmox.Task, error) {
+	if newid == 0 {
+		cl, err := c.Cluster(ctx)
+		if err != nil {
+			return 0, nil, fmt.Errorf("getting cluster for next ID: %w", err)
+		}
+		newid, err = cl.NextID(ctx)
+		if err != nil {
+			return 0, nil, fmt.Errorf("getting next available ID: %w", err)
+		}
+	}
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return 0, nil, err
+	}
+	clonedID, task, err := ct.Clone(ctx, &proxmox.ContainerCloneOptions{
+		NewID:    newid,
+		Hostname: name,
+	})
+	return clonedID, task, err
+}

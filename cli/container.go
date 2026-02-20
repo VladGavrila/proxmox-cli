@@ -25,8 +25,11 @@ func containerCmd() *cobra.Command {
 	cmd.AddCommand(ctListCmd())
 	cmd.AddCommand(ctStartCmd())
 	cmd.AddCommand(ctStopCmd())
+	cmd.AddCommand(ctShutdownCmd())
 	cmd.AddCommand(ctRebootCmd())
 	cmd.AddCommand(ctInfoCmd())
+	cmd.AddCommand(ctCloneCmd())
+	cmd.AddCommand(ctDeleteCmd())
 	cmd.AddCommand(ctSnapshotCmd())
 	return cmd
 }
@@ -61,6 +64,15 @@ func printContainers(cmd *cobra.Command, cts proxmox.ClusterResources) error {
 		return enc.Encode(cts)
 	}
 
+	if len(cts) == 0 {
+		if stdoutIsTerminal() {
+			fmt.Fprintf(cmd.OutOrStdout(), "%sNo containers available.%s\n", colorGold, colorReset)
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "No containers available.")
+		}
+		return nil
+	}
+
 	// Write to a buffer first so tabwriter aligns columns before we apply color.
 	var buf bytes.Buffer
 	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
@@ -88,7 +100,7 @@ func printContainers(cmd *cobra.Command, cts proxmox.ClusterResources) error {
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	for i, line := range lines {
 		if useColor && i > 0 && cts[i-1].Template == 1 {
-			fmt.Fprintf(out, "\033[31m%s\033[0m\n", line)
+			fmt.Fprintf(out, "%s%s%s\n", colorRed, line, colorReset)
 		} else {
 			fmt.Fprintln(out, line)
 		}
@@ -240,6 +252,112 @@ func ctInfoCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func ctShutdownCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "shutdown <ctid>",
+		Short: "Gracefully shut down a container",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Connecting...")
+			task, err := actions.ShutdownContainer(ctx, proxmoxClient, ctid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Shutting down container %d...\n", ctid)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Container %d shut down.\n", ctid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func ctDeleteCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "delete <ctid>",
+		Short: "Delete a container (must be stopped)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Connecting...")
+			task, err := actions.DeleteContainer(ctx, proxmoxClient, ctid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleting container %d...\n", ctid)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Container %d deleted.\n", ctid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func ctCloneCmd() *cobra.Command {
+	var (
+		nodeName string
+		newid    int
+	)
+	cmd := &cobra.Command{
+		Use:   "clone <ctid> <name>",
+		Short: "Clone a container",
+		Args:  cobra.ExactArgs(2),
+		Example: `  pxve ct clone 101 myClone            # auto-assign next available ID
+  pxve ct clone 101 myClone --newid 200`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			name := args[1]
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Connecting...")
+			clonedID, task, err := actions.CloneContainer(ctx, proxmoxClient, ctid, newid, nodeName, name)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Cloning container %d to %q (ID %d)...\n", ctid, name, clonedID)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Clone complete: %q (CTID %d).\n", name, clonedID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().IntVar(&newid, "newid", 0, "ID for the new container (default: next available)")
 	return cmd
 }
 

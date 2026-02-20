@@ -8,7 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const configFileName = ".proxmox-cli.yaml"
+const configFileName = ".pxve.yaml"
 
 // InstanceConfig holds configuration for a single Proxmox instance.
 type InstanceConfig struct {
@@ -79,7 +79,7 @@ func (c *Config) Resolve(instanceName string) (*InstanceConfig, string, error) {
 		instanceName = c.CurrentInstance
 	}
 	if instanceName == "" {
-		return nil, "", fmt.Errorf("no instance selected — run 'proxmox-cli instance use <name>' or set PROXMOX_INSTANCE")
+		return nil, "", fmt.Errorf("no instance selected — run 'pxve instance use <name>' or set PROXMOX_INSTANCE")
 	}
 
 	inst, ok := c.Instances[instanceName]

@@ -65,6 +65,15 @@ func printVMs(cmd *cobra.Command, vms proxmox.ClusterResources) error {
 		return enc.Encode(vms)
 	}
 
+	if len(vms) == 0 {
+		if stdoutIsTerminal() {
+			fmt.Fprintf(cmd.OutOrStdout(), "%sNo VMs available.%s\n", colorGold, colorReset)
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "No VMs available.")
+		}
+		return nil
+	}
+
 	// Write to a buffer first so tabwriter aligns columns before we apply color.
 	var buf bytes.Buffer
 	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
@@ -94,7 +103,7 @@ func printVMs(cmd *cobra.Command, vms proxmox.ClusterResources) error {
 	for i, line := range lines {
 		// Line 0 is the header; data rows start at index 1.
 		if useColor && i > 0 && vms[i-1].Template == 1 {
-			fmt.Fprintf(out, "\033[31m%s\033[0m\n", line)
+			fmt.Fprintf(out, "%s%s%s\n", colorRed, line, colorReset)
 		} else {
 			fmt.Fprintln(out, line)
 		}
@@ -328,8 +337,8 @@ func vmCloneCmd() *cobra.Command {
 		Use:   "clone <vmid> <name>",
 		Short: "Clone a VM",
 		Args:  cobra.ExactArgs(2),
-		Example: `  proxmox-cli vm clone 101 UClone            # auto-assign next available ID
-  proxmox-cli vm clone 101 UClone --newid 200`,
+		Example: `  pxve vm clone 101 UClone            # auto-assign next available ID
+  pxve vm clone 101 UClone --newid 200`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vmid, err := strconv.Atoi(args[0])
 			if err != nil {

@@ -93,8 +93,8 @@ func userCreateCmd() *cobra.Command {
 Common realms:
   @pam   — Linux PAM authentication (local system users)
   @pve   — Proxmox built-in authentication`,
-		Example: `  proxmox-cli user create alice@pve --password secret --firstname Alice --lastname Smith
-  proxmox-cli user create bob@pam --email bob@example.com`,
+		Example: `  pxve user create alice@pve --password secret --firstname Alice --lastname Smith
+  pxve user create bob@pam --email bob@example.com`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userid := args[0]
@@ -217,9 +217,9 @@ Common built-in roles:
   PVEAdmin     — full cluster management (except user management)
   Administrator — unrestricted access
   PVEAuditor   — read-only access`,
-		Example: `  proxmox-cli user grant alice@pve --vmid 100,101 --role PVEVMUser
-  proxmox-cli user grant alice@pve --vmid 100 --vmid 101 --role PVEVMAdmin
-  proxmox-cli user grant alice@pve --path /storage/local --role PVEDatastoreUser`,
+		Example: `  pxve user grant alice@pve --vmid 100,101 --role PVEVMUser
+  pxve user grant alice@pve --vmid 100 --vmid 101 --role PVEVMAdmin
+  pxve user grant alice@pve --path /storage/local --role PVEDatastoreUser`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userid := args[0]
@@ -280,7 +280,7 @@ func userRevokeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "revoke <userid>",
 		Short:   "Revoke a user's access to VMs or containers",
-		Example: `  proxmox-cli user revoke alice@pve --vmid 100 --role PVEVMUser`,
+		Example: `  pxve user revoke alice@pve --vmid 100 --role PVEVMUser`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userid := args[0]
@@ -404,8 +404,8 @@ The token secret is shown only once — save it immediately.
 Privilege separation (privsep, enabled by default) means the token's effective
 permissions are the intersection of the user's permissions and any ACLs granted
 directly to the token. Disable with --no-privsep to inherit all user permissions.`,
-		Example: `  proxmox-cli user token create alice@pve cli-token
-  proxmox-cli user token create alice@pve automation --comment "CI pipeline" --no-privsep`,
+		Example: `  pxve user token create alice@pve cli-token
+  pxve user token create alice@pve automation --comment "CI pipeline" --no-privsep`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			userid := args[0]

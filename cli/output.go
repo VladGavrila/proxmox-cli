@@ -11,6 +11,13 @@ import (
 	proxmox "github.com/luthermonson/go-proxmox"
 )
 
+// ANSI color codes used across CLI output functions.
+const (
+	colorReset = "\033[0m"
+	colorRed   = "\033[31m"         // template VMs / containers
+	colorGold  = "\033[38;5;220m"   // empty-list notices
+)
+
 // Spinner shows an animated braille spinner on stderr while work is in progress.
 // It is a no-op when stderr is not a terminal (e.g. when output is piped).
 type Spinner struct {

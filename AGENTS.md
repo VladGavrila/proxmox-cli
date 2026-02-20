@@ -1,4 +1,4 @@
-# proxmox-cli — Agent Guide
+# pxve — Agent Guide
 
 A Go CLI for managing Proxmox VE clusters, built on top of
 `github.com/luthermonson/go-proxmox v0.4.0`.
@@ -8,7 +8,7 @@ A Go CLI for managing Proxmox VE clusters, built on top of
 ## Repository Layout
 
 ```
-proxmox-cli/
+pxve/
 ├── main.go                          # Entry point — calls cli.Execute(version)
 ├── Makefile                         # build, tidy, clean targets
 ├── go.mod / go.sum
@@ -16,25 +16,25 @@ proxmox-cli/
 │   ├── root.go                      # Root command, global flags, initClient(), handleErr()
 │   ├── instance.go                  # instance add/remove/list/use/show + verifyInstance()
 │   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot
-│   ├── container.go                 # ct list/start/stop/reboot/info/snapshot
+│   ├── container.go                 # ct list/start/stop/shutdown/reboot/info/clone/delete/snapshot
 │   ├── node.go                      # node list/info
 │   ├── cluster.go                   # cluster status/resources/tasks
 │   ├── user.go                      # user list/create/delete/password/grant/revoke/token
 │   ├── access.go                    # acl list; role list
 │   └── output.go                    # watchTask(), formatBytes(), formatUptime(), formatCPUPercent()
 ├── internal/
-│   ├── config/config.go             # Load/Save ~/.proxmox-cli.yaml via yaml.v3 (NOT viper)
+│   ├── config/config.go             # Load/Save ~/.pxve.yaml via yaml.v3 (NOT viper)
 │   ├── client/client.go             # Build proxmox.Client from InstanceConfig
 │   ├── errors/errors.go             # Handle() maps sentinel errors to friendly messages
 │   └── actions/                     # All Proxmox logic — shared by CLI (future TUI reuse)
 │       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
-│       ├── container.go             # ListContainers, FindContainer, Start/Stop/Reboot/Snapshots
+│       ├── container.go             # ListContainers, FindContainer, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
 │       ├── node.go                  # ListNodes, GetNode
 │       ├── cluster.go               # GetCluster, ClusterResources, ClusterTasks
 │       └── access.go                # ListUsers/Tokens/ACLs/Roles, Create/Delete, Grant/Revoke
 └── dist/                            # Compiled binaries (git-ignored)
-    ├── proxmox-cli-darwin-arm64
-    └── proxmox-cli-linux-amd64
+    ├── pxve-macos-arm64
+    └── pxve-linux-amd64
 ```
 
 ---
@@ -59,7 +59,7 @@ proxmox-cli/
   it must run on both success and error paths.
 
 ### Config (`internal/config/config.go`)
-- Config file: `~/.proxmox-cli.yaml`
+- Config file: `~/.pxve.yaml`
 - Uses `gopkg.in/yaml.v3` directly — **never use viper** (viper lowercases all map
   keys on load, which breaks case-sensitive instance names like `"pveHomeLab"`).
 - `InstanceConfig` fields: `url`, `token-id`, `token-secret`, `username`, `password`,
@@ -163,8 +163,8 @@ Follow this pattern — everything else already exists:
 
 3. **Register it** by adding `cmd.AddCommand(vmFooCmd())` inside `vmCmd()`.
 
-4. **Build**: `make build` — produces `dist/proxmox-cli-darwin-arm64` and
-   `dist/proxmox-cli-linux-amd64`.
+4. **Build**: `make build` — produces `dist/pxve-macos-arm64` and
+   `dist/pxve-linux-amd64`.
 
 ---
 
@@ -197,8 +197,8 @@ Follow this pattern — everything else already exists:
 ## Build
 
 ```sh
-make build          # darwin-arm64 + linux-amd64 into dist/
-make darwin-arm     # macOS Apple Silicon only
+make build          # macos-arm64 + linux-amd64 into dist/
+make macos-arm      # macOS Apple Silicon only
 make linux-amd64    # Linux x86-64 only
 make tidy           # go mod tidy
 make clean          # remove dist/

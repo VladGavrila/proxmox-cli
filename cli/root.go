@@ -34,15 +34,15 @@ var (
 
 // rootCmd is the base command.
 var rootCmd = &cobra.Command{
-	Use:   "proxmox-cli",
+	Use:   "pxve",
 	Short: "A CLI for managing Proxmox VE infrastructure",
-	Long: `proxmox-cli provides a command-line interface to manage Proxmox VE
+	Long: `pxve provides a command-line interface to manage Proxmox VE
 clusters, nodes, virtual machines, and containers.
 
 Configure a Proxmox instance with:
-  proxmox-cli instance add home-lab --url https://192.168.1.10:8006 \
+  pxve instance add home-lab --url https://192.168.1.10:8006 \
     --token-id root@pam!cli --token-secret <secret>
-  proxmox-cli instance use home-lab`,
+  pxve instance use home-lab`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }
@@ -66,7 +66,7 @@ func Execute(version string) {
 		Use:   "version",
 		Short: "Print the version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "proxmox-cli %s\n", appVersion)
+			fmt.Fprintf(cmd.OutOrStdout(), "pxve %s\n", appVersion)
 		},
 	})
 

@@ -99,12 +99,12 @@ func instanceAddCmd() *cobra.Command {
 		Short:        "Add a new Proxmox instance",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: false, // show usage when required flags are missing
-		Example: `  proxmox-cli instance add home-lab \
+		Example: `  pxve instance add home-lab \
     --url https://172.20.20.25:8006 \
     --token-id root@pam!cli \
     --token-secret xxxxxxxx
 
-  proxmox-cli instance add work-cluster \
+  pxve instance add work-cluster \
     --url https://proxmox.company.com:8006 \
     --username admin@pam \
     --password secret \

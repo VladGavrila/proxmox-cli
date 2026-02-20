@@ -16,10 +16,10 @@ jobs:
         include:
           - goos: darwin
             goarch: arm64
-            asset: proxmox-cli-darwin-arm64
+            asset: pxve-macos-arm64
           - goos: linux
             goarch: amd64
-            asset: proxmox-cli-linux-amd64
+            asset: pxve-linux-amd64
 
     steps:
       - uses: actions/checkout@v4
