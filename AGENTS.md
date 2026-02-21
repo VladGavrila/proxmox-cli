@@ -13,7 +13,7 @@ pxve/
 ├── Makefile                         # build, tidy, clean targets
 ├── go.mod / go.sum
 ├── cli/                             # Cobra command layer (thin: parse → action → format)
-│   ├── root.go                      # Root command, global flags, initClient(), handleErr()
+│   ├── root.go                      # Root command, global flags, initClient(), handleErr(), --tui launch
 │   ├── instance.go                  # instance add/remove/list/use/show + verifyInstance()
 │   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot
 │   ├── container.go                 # ct list/start/stop/shutdown/reboot/info/clone/delete/snapshot
@@ -22,11 +22,19 @@ pxve/
 │   ├── user.go                      # user list/create/delete/password/grant/revoke/token
 │   ├── access.go                    # acl list; role list
 │   └── output.go                    # watchTask(), formatBytes(), formatUptime(), formatCPUPercent()
+├── tui/                             # Bubble Tea interactive TUI (launched via pxve --tui)
+│   ├── tui.go                       # appModel router, screen enum, LaunchTUI() entry point
+│   ├── selector.go                  # Instance picker + inline add/remove instance form
+│   ├── list.go                      # VM + CT list table with auto-refresh
+│   ├── detail.go                    # VM/CT detail: info, power actions, snapshot CRUD
+│   ├── users.go                     # Proxmox user list + inline create/delete
+│   ├── userdetail.go                # User detail: tokens + ACLs, create/delete/grant/revoke
+│   └── styles.go                    # Shared lipgloss styles, headerLine(), CLISpinner
 ├── internal/
 │   ├── config/config.go             # Load/Save ~/.pxve.yaml via yaml.v3 (NOT viper)
 │   ├── client/client.go             # Build proxmox.Client from InstanceConfig
 │   ├── errors/errors.go             # Handle() maps sentinel errors to friendly messages
-│   └── actions/                     # All Proxmox logic — shared by CLI (future TUI reuse)
+│   └── actions/                     # All Proxmox logic — shared by CLI and TUI
 │       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
 │       ├── container.go             # ListContainers, FindContainer, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
 │       ├── node.go                  # ListNodes, GetNode
@@ -165,6 +173,81 @@ Follow this pattern — everything else already exists:
 
 4. **Build**: `make build` — produces `dist/pxve-macos-arm64` and
    `dist/pxve-linux-amd64`.
+
+---
+
+## TUI (`tui/`)
+
+The interactive TUI is launched via `pxve --tui` (local flag on `rootCmd`).
+It uses [Bubble Tea](https://github.com/charmbracelet/bubbletea) v0.25.0 with
+Bubbles v0.18.0 and Lipgloss v0.9.1.
+
+### Architecture
+
+A single **router model** (`appModel` in `tui/tui.go`) owns five sub-models, one
+per screen:
+
+| Screen           | Model             | File             | Purpose                                          |
+|------------------|-------------------|------------------|--------------------------------------------------|
+| `screenSelector` | `selectorModel`   | `selector.go`    | Pick / add / remove Proxmox instances from config |
+| `screenList`     | `listModel`       | `list.go`        | Table of all VMs + CTs for the connected instance |
+| `screenUsers`    | `usersModel`      | `users.go`       | Table of Proxmox users + create / delete          |
+| `screenDetail`   | `detailModel`     | `detail.go`      | VM/CT info, power actions, snapshot CRUD           |
+| `screenUserDetail` | `userDetailModel` | `userdetail.go` | User info, token CRUD, ACL grant/revoke           |
+
+### Navigation flow
+
+```
+Selector ──Enter──▸ List ──Enter──▸ Detail
+                     │ Tab             │
+                     ▼                 │ Esc
+                   Users ──Enter──▸ UserDetail
+                     │                 │
+                     Esc               Esc
+                     ▼                 ▼
+                  Selector           Users
+```
+
+- **Esc** goes back one screen (or dismisses an active dialog/overlay).
+- **Tab** toggles between the List and Users screens.
+- **Q** / **Ctrl+C** quits (Q is passed through when a text input is active).
+
+### Key patterns
+
+- **Sub-model typing**: Sub-models have typed `update(msg) (Model, tea.Cmd)`
+  methods (not the `tea.Model` interface). The router delegates via a switch.
+- **`withRebuiltTable()` value-receiver**: Used on resize — returns a copy of
+  the model with a fresh `table.Model` sized to the new terminal dimensions.
+- **Overlay modes**: Each screen that supports dialogs (selector, detail, users,
+  userDetail) has a `mode` enum (`detailNormal`, `detailInputName`, etc.).
+  The router checks the mode before consuming Esc/Q to avoid swallowing keys
+  meant for a dialog.
+- **Async messages**: API calls run in `tea.Cmd` functions and return typed
+  messages (`resourcesFetchedMsg`, `detailLoadedMsg`, `actionResultMsg`, etc.).
+  Stale responses are discarded by comparing `fetchID` timestamps.
+- **Client caching**: `appModel.clientCache` stores connected `*proxmox.Client`
+  instances keyed by instance name. `listCache` stores `listModel` state so
+  switching back to a previously visited instance is instant.
+- **Feedback + reload**: Mutating actions (snapshot create/delete, user
+  create/delete, token create/delete) emit a `reloadSnapshotsMsg` /
+  `usersActionMsg` / `userDetailActionMsg` that shows a status message and
+  triggers an automatic list reload.
+
+### Shared styles (`tui/styles.go`)
+
+All screens use the styles defined in `styles.go` (`StyleTitle`, `StyleError`,
+`StyleSuccess`, etc.). The `headerLine()` helper places a title on the left
+and a "Refreshed: ..." timestamp on the right. `CLISpinner` matches the
+braille spinner used in the CLI output.
+
+### Adding a new TUI screen
+
+1. Create a new file `tui/newscreen.go` with a model struct, `update()`,
+   `view()`, and an `init()` method that returns a `tea.Cmd`.
+2. Add a new `screen` constant in `tui/tui.go`.
+3. Add the model field to `appModel` and wire it into `Update()` (navigation
+   transitions) and `View()`.
+4. Handle `tea.WindowSizeMsg` in the router for the new screen.
 
 ---
 

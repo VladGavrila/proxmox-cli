@@ -11,6 +11,7 @@ containers, nodes, users, and access control.
 - **ACLs** — grant and revoke roles on VMs, containers, or arbitrary paths
 - **Multi-instance** — manage multiple Proxmox servers with named profiles
 - **Output formats** — human-readable tables or `--output json`
+- **Interactive TUI** — full-screen terminal UI for browsing and managing instances, VMs, containers, users, and snapshots
 
 ## Quick Start
 
@@ -37,6 +38,28 @@ pxve vm snapshot create 101 before-upgrade
 pxve user create alice@pve --password secret
 pxve user grant alice@pve --vmid 101 --role PVEVMUser
 ```
+
+## Interactive TUI
+
+Launch the interactive terminal UI with:
+
+```sh
+pxve --tui
+```
+
+The TUI provides a keyboard-driven interface for managing your Proxmox
+infrastructure without memorizing CLI subcommands. It reads instance
+profiles from `~/.pxve.yaml` and lets you:
+
+- **Select an instance** — pick from configured instances, add or remove instances inline
+- **Browse VMs & containers** — sortable table with status, CPU, memory, and disk usage
+- **Manage snapshots** — create, delete, and rollback snapshots from the detail view
+- **Power actions** — start, stop, shutdown, and reboot directly from the detail view
+- **Manage users** — list, create, and delete Proxmox users
+- **Manage tokens & ACLs** — create/delete API tokens, grant/revoke ACL roles per user
+
+Navigation: **Enter** to select, **Esc** to go back, **Tab** to switch between
+VMs and Users views, **Q** or **Ctrl+C** to quit.
 
 ## Instance Management
 
@@ -137,4 +160,10 @@ Available on every command:
 -i, --instance <name>    use a named instance from config
     --output json         output as JSON instead of table
     --secure              enforce TLS certificate verification (default: skip)
+```
+
+### Root Flags
+
+```
+    --tui                 launch interactive terminal UI
 ```
