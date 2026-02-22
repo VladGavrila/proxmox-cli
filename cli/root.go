@@ -13,10 +13,10 @@ import (
 	"github.com/chupakbra/proxmox-cli/tui"
 )
 
-var (
-	// appVersion is set by Execute.
-	appVersion string
+// version is set at build time via -X github.com/chupakbra/proxmox-cli/cli.version=<ver>.
+var version = "1.4.0"
 
+var (
 	// global state resolved in PersistentPreRunE
 	proxmoxClient   *proxmox.Client
 	resolvedConfig  *config.Config
@@ -36,8 +36,9 @@ var (
 
 // rootCmd is the base command.
 var rootCmd = &cobra.Command{
-	Use:   "pxve",
-	Short: "A CLI for managing Proxmox VE infrastructure",
+	Use:     "pxve",
+	Version: version,
+	Short:   "A CLI for managing Proxmox VE infrastructure",
 	Long: `pxve provides a command-line interface to manage Proxmox VE
 clusters, nodes, virtual machines, and containers.
 
@@ -65,8 +66,8 @@ Configure a Proxmox instance with:
 }
 
 // Execute wires the command tree and runs it.
-func Execute(version string) {
-	appVersion = version
+func Execute() {
+	rootCmd.SetVersionTemplate("pxve {{.Version}}\n")
 
 	// Local flags (root command only)
 	rootCmd.Flags().BoolVar(&flagTUI, "tui", false, "launch interactive terminal UI")
@@ -80,15 +81,6 @@ func Execute(version string) {
 	rootCmd.PersistentFlags().StringVar(&flagPassword, "password", "", "Proxmox password")
 	rootCmd.PersistentFlags().BoolVar(&flagSecure, "secure", false, "enforce TLS certificate verification (default is to skip verification)")
 	rootCmd.PersistentFlags().StringVarP(&flagOutput, "output", "o", "table", "output format: table or json")
-
-	// Version command
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "version",
-		Short: "Print the version",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "pxve %s\n", appVersion)
-		},
-	})
 
 	// Sub-command groups
 	rootCmd.AddCommand(instanceCmd())

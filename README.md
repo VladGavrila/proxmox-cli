@@ -11,6 +11,7 @@ containers, nodes, users, and access control.
 - **Users & tokens** — create, delete, password, API token management
 - **ACLs** — grant and revoke roles on VMs, containers, or arbitrary paths
 - **Multi-instance** — manage multiple Proxmox servers with named profiles
+- **Instance discovery** — scan any subnet for Proxmox instances on port 8006
 - **Output formats** — human-readable tables or `--output json`
 - **Interactive TUI** — full-screen terminal UI for browsing and managing instances, VMs, containers, backups, users, and snapshots
 
@@ -62,7 +63,7 @@ The TUI provides a keyboard-driven interface for managing your Proxmox
 infrastructure without memorizing CLI subcommands. It reads instance
 profiles from `~/.pxve.yaml` and lets you:
 
-- **Select an instance** — pick from configured instances, add or remove instances inline
+- **Select an instance** — pick from configured instances, add, remove, or discover instances inline
 - **Browse VMs & containers** — sortable table with status, CPU, memory, and disk usage
 - **Power actions** — start, stop, shutdown, reboot, clone, and delete directly from the list or detail view
 - **Manage snapshots** — create, delete, and rollback snapshots from the detail view
@@ -84,12 +85,13 @@ Instances are stored in `~/.pxve.yaml`. Authentication supports both API
 tokens (recommended) and username/password.
 
 ```sh
-pxve instance add <name> --url <url> --token-id '<id>' --token-secret <secret>
-pxve instance add <name> --url <url> --username root@pam --password <pass>
+pxve instance add     <name> --url <url> --token-id '<id>' --token-secret <secret>
+pxve instance add     <name> --url <url> --username root@pam --password <pass>
 pxve instance list
-pxve instance use <name>
-pxve instance show [name]
-pxve instance remove <name>
+pxve instance use     <name>
+pxve instance show    [name]
+pxve instance remove  <name>
+pxve instance discover [subnet...]
 ```
 
 TLS certificate verification is **skipped by default** (most Proxmox nodes use

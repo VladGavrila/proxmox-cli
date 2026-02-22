@@ -1,6 +1,5 @@
 BINARY  := pxve
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
+LDFLAGS := -ldflags "-s -w"
 
 .PHONY: build macos-arm linux-amd64 clean tidy
 

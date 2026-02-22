@@ -86,8 +86,8 @@ func newListModel(c *proxmox.Client, instName string, w, h int) listModel {
 
 // fixedColWidth is the total width of all columns except NAME.
 // VMID(6) + TYPE(4) + TMPL(5) + NODE(12) + STATUS(10) + CPU(7) + MEM(10) + DISK(10) = 64
-// Plus separators/padding ~ 10.
-const fixedColWidth = 64 + 10
+// Plus cell padding: 9 columns × 2 chars (1 left + 1 right per cell) = 18.
+const fixedColWidth = 64 + 18
 
 func (m listModel) nameColWidth() int {
 	w := m.width - fixedColWidth - 4 // 4 for outer padding

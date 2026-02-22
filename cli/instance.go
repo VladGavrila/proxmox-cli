@@ -12,6 +12,7 @@ import (
 
 	"github.com/chupakbra/proxmox-cli/internal/client"
 	"github.com/chupakbra/proxmox-cli/internal/config"
+	"github.com/chupakbra/proxmox-cli/internal/discovery"
 )
 
 var tokenIDRegex = regexp.MustCompile(`^[^@]+@[^!]+![^!]+$`)
@@ -28,6 +29,7 @@ func instanceCmd() *cobra.Command {
 	cmd.AddCommand(instanceRemoveCmd())
 	cmd.AddCommand(instanceUseCmd())
 	cmd.AddCommand(instanceShowCmd())
+	cmd.AddCommand(instanceDiscoverCmd())
 	return cmd
 }
 
@@ -288,6 +290,60 @@ func instanceShowCmd() *cobra.Command {
 			}
 			fmt.Fprintf(w, "Verify TLS:\t%v\n", inst.VerifyTLS)
 			fmt.Fprintf(w, "Current:\t%v\n", name == cfg.CurrentInstance)
+			return w.Flush()
+		},
+	}
+}
+
+// instanceDiscoverCmd scans the network for Proxmox instances.
+func instanceDiscoverCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "discover [subnet...]",
+		Short: "Scan the network for Proxmox instances",
+		Long: `Scan one or more subnets for Proxmox instances listening on port 8006.
+
+If no subnets are given, the local machine's subnets are scanned.
+Subnets can be specified as CIDR (172.20.20.0/24), an IP (172.20.20.5),
+or a partial prefix (172.20.20).`,
+		Example: `  pxve instance discover
+  pxve instance discover 172.20.20.0/24
+  pxve instance discover 172.20.20 172.20.21`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var subnets []string
+			for _, arg := range args {
+				cidr, err := discovery.NormalizeSubnet(arg)
+				if err != nil {
+					return err
+				}
+				subnets = append(subnets, cidr)
+			}
+
+			label := "local subnets"
+			if len(subnets) > 0 {
+				label = strings.Join(subnets, ", ")
+			}
+			s := startSpinner(fmt.Sprintf("Scanning %s for Proxmox instances...", label))
+			result, err := discovery.Scan(subnets)
+			s.Stop()
+			if err != nil {
+				return err
+			}
+
+			scanned := strings.Join(result.Subnets, ", ")
+			if len(result.Instances) == 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "No Proxmox instances found on %s\n", scanned)
+				return nil
+			}
+
+			if flagOutput == "json" {
+				return jsonOut(cmd, result.Instances)
+			}
+
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "IP\tURL")
+			for _, inst := range result.Instances {
+				fmt.Fprintf(w, "%s\t%s\n", inst.IP, inst.URL)
+			}
 			return w.Flush()
 		},
 	}

@@ -16,15 +16,19 @@ import (
 
 	"github.com/chupakbra/proxmox-cli/internal/client"
 	"github.com/chupakbra/proxmox-cli/internal/config"
+	"github.com/chupakbra/proxmox-cli/internal/discovery"
 )
 
 // selectorMode controls which overlay (if any) is active.
 type selectorMode int
 
 const (
-	selectorNormal     selectorMode = iota
-	selectorAdding                  // add-instance form is open
-	selectorConfirmDel              // delete-instance confirmation overlay
+	selectorNormal         selectorMode = iota
+	selectorAdding                      // add-instance form is open
+	selectorConfirmDel                  // delete-instance confirmation overlay
+	selectorDiscoverInput               // typing a subnet to scan
+	selectorDiscovering                 // scanning network
+	selectorDiscoverResult              // showing discovered instances
 )
 
 // connectErrMsg is sent when connecting to a Proxmox instance fails.
@@ -49,6 +53,11 @@ type selectorModel struct {
 	// Status feedback after add/remove.
 	statusMsg string
 	statusErr bool
+
+	// Discovery.
+	discoverInput textinput.Model // subnet input
+	discovered    []discovery.Instance
+	discoverTable table.Model
 
 	// Shared cache of connected clients (owned by appModel).
 	clientCache map[string]*proxmox.Client
@@ -80,13 +89,18 @@ func newSelectorModel(cfg *config.Config, clientCache map[string]*proxmox.Client
 		inputs[i] = ti
 	}
 
+	di := textinput.New()
+	di.Placeholder = "e.g. 172.20.20 (empty = local subnets)"
+	di.CharLimit = 60
+
 	m := selectorModel{
-		cfg:         cfg,
-		instances:   cfg.Instances,
-		current:     cfg.CurrentInstance,
-		spinner:     s,
-		addInputs:   inputs,
-		clientCache: clientCache,
+		cfg:           cfg,
+		instances:     cfg.Instances,
+		current:       cfg.CurrentInstance,
+		spinner:       s,
+		addInputs:     inputs,
+		discoverInput: di,
+		clientCache:   clientCache,
 	}
 	m.table = m.buildTable()
 	return m
@@ -154,6 +168,55 @@ func (m selectorModel) buildTable() table.Model {
 	return t
 }
 
+func (m selectorModel) buildDiscoverTable() table.Model {
+	ipWidth := 18
+	urlWidth := 35
+
+	if m.width > 0 {
+		remaining := m.width - ipWidth - 10
+		if remaining > urlWidth {
+			urlWidth = remaining
+		}
+	}
+
+	cols := []table.Column{
+		{Title: "IP", Width: ipWidth},
+		{Title: "URL", Width: urlWidth},
+	}
+
+	rows := make([]table.Row, len(m.discovered))
+	for i, d := range m.discovered {
+		rows[i] = table.Row{d.IP, d.URL}
+	}
+
+	tableHeight := 10
+	if m.height > 0 {
+		tableHeight = m.height - 12
+		if tableHeight < 3 {
+			tableHeight = 3
+		}
+	}
+
+	t := table.New(
+		table.WithColumns(cols),
+		table.WithRows(rows),
+		table.WithFocused(true),
+		table.WithHeight(tableHeight),
+	)
+	s := table.DefaultStyles()
+	s.Header = s.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		BorderBottom(true).
+		Bold(true)
+	s.Selected = s.Selected.
+		Foreground(lipgloss.Color("255")).
+		Background(lipgloss.Color("62")).
+		Bold(true)
+	t.SetStyles(s)
+	return t
+}
+
 func (m selectorModel) init() tea.Cmd {
 	return nil
 }
@@ -165,10 +228,32 @@ func (m selectorModel) update(msg tea.Msg) (selectorModel, tea.Cmd) {
 		m.connectErr = msg.err.Error()
 		return m, nil
 
+	case discoveryDoneMsg:
+		if m.mode != selectorDiscovering {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.mode = selectorNormal
+			m.statusMsg = fmt.Sprintf("Discovery failed: %s", msg.err)
+			m.statusErr = true
+			return m, nil
+		}
+		scanned := strings.Join(msg.result.Subnets, ", ")
+		if len(msg.result.Instances) == 0 {
+			m.mode = selectorNormal
+			m.statusMsg = fmt.Sprintf("No Proxmox instances found on %s", scanned)
+			m.statusErr = false
+			return m, nil
+		}
+		m.discovered = msg.result.Instances
+		m.discoverTable = m.buildDiscoverTable()
+		m.mode = selectorDiscoverResult
+		return m, nil
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if m.connecting {
+		if m.connecting || m.mode == selectorDiscovering {
 			return m, cmd
 		}
 		return m, nil
@@ -176,6 +261,82 @@ func (m selectorModel) update(msg tea.Msg) (selectorModel, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.connecting {
 			return m, nil
+		}
+
+		// Discover subnet input mode.
+		if m.mode == selectorDiscoverInput {
+			switch msg.String() {
+			case "esc":
+				m.mode = selectorNormal
+				m.discoverInput.Blur()
+				return m, nil
+			case "enter":
+				raw := strings.TrimSpace(m.discoverInput.Value())
+				m.discoverInput.Blur()
+				var subnets []string
+				if raw != "" {
+					// Support space/comma separated multiple subnets.
+					for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+						return r == ',' || r == ' '
+					}) {
+						part = strings.TrimSpace(part)
+						if part == "" {
+							continue
+						}
+						cidr, err := discovery.NormalizeSubnet(part)
+						if err != nil {
+							m.mode = selectorNormal
+							m.statusMsg = fmt.Sprintf("Invalid subnet: %s", err)
+							m.statusErr = true
+							return m, nil
+						}
+						subnets = append(subnets, cidr)
+					}
+				}
+				m.mode = selectorDiscovering
+				return m, tea.Batch(
+					discoverInstancesCmd(subnets),
+					m.spinner.Tick,
+				)
+			default:
+				var cmd tea.Cmd
+				m.discoverInput, cmd = m.discoverInput.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// Discovering mode — only allow Esc to cancel.
+		if m.mode == selectorDiscovering {
+			if msg.String() == "esc" {
+				m.mode = selectorNormal
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// Discover results mode.
+		if m.mode == selectorDiscoverResult {
+			switch msg.String() {
+			case "enter":
+				row := m.discoverTable.SelectedRow()
+				if len(row) == 0 {
+					return m, nil
+				}
+				// Pre-populate the add form with discovered URL.
+				m.mode = selectorAdding
+				m.addFocus = 0
+				m.addInputs[0].Focus()
+				m.addInputs[1].SetValue(row[1]) // URL column
+				return m, textinput.Blink
+			case "esc":
+				m.mode = selectorNormal
+				m.discovered = nil
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.discoverTable, cmd = m.discoverTable.Update(msg)
+				return m, cmd
+			}
 		}
 
 		// Add-instance form mode.
@@ -291,6 +452,13 @@ func (m selectorModel) update(msg tea.Msg) (selectorModel, tea.Cmd) {
 			m.addInputs[0].Focus()
 			return m, textinput.Blink
 		case "d":
+			m.mode = selectorDiscoverInput
+			m.discoverInput.Reset()
+			m.discoverInput.Focus()
+			m.statusMsg = ""
+			m.connectErr = ""
+			return m, textinput.Blink
+		case "R":
 			if len(m.table.Rows()) == 0 {
 				return m, nil
 			}
@@ -338,11 +506,43 @@ func (m selectorModel) view() string {
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
+	// Discover subnet input overlay.
+	if m.mode == selectorDiscoverInput {
+		lines := []string{title, "", StyleTitle.Render("Discover Instances"), ""}
+		label := StyleWarning.Render("  Subnet:       ")
+		lines = append(lines, label+m.discoverInput.View())
+		lines = append(lines, "")
+		lines = append(lines, StyleHelp.Render("[Enter] scan (empty = local subnets)   [Esc] cancel"))
+		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
+	}
+
+	// Discovery scanning overlay.
+	if m.mode == selectorDiscovering {
+		lines := []string{title, "", StyleWarning.Render(m.spinner.View() + " Scanning network for Proxmox instances...")}
+		lines = append(lines, "", StyleHelp.Render("[Esc] cancel"))
+		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
+	}
+
+	// Discovery results overlay.
+	if m.mode == selectorDiscoverResult {
+		lines := []string{title, "", StyleTitle.Render("Discovered Instances"), ""}
+		lines = append(lines, m.discoverTable.View())
+		lines = append(lines, "", StyleHelp.Render("[Enter] add   [Esc] back"))
+		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
+	}
+
 	if len(m.instances) == 0 {
-		notice := StyleDim.Render("No instances configured. Press 'a' to add one.")
-		return lipgloss.NewStyle().Padding(1, 2).Render(
-			strings.Join([]string{title, "", notice, "", StyleHelp.Render("[a] add   [Q] quit")}, "\n"),
-		)
+		notice := StyleDim.Render("No instances configured. Press 'a' to add one, or 'd' to discover.")
+		lines := []string{title, "", notice, ""}
+		if m.statusMsg != "" && m.statusErr {
+			lines = append(lines, StyleError.Render(m.statusMsg))
+		} else if m.statusMsg != "" {
+			lines = append(lines, StyleSuccess.Render(m.statusMsg))
+		} else {
+			lines = append(lines, "")
+		}
+		lines = append(lines, StyleHelp.Render("[a] add   [d] discover   [Q] quit"))
+		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
 	var lines []string
@@ -377,7 +577,7 @@ func (m selectorModel) view() string {
 		lines = append(lines, "") // keep height stable
 	}
 
-	lines = append(lines, StyleHelp.Render("[Enter] connect  |  [a] add   [d] remove"))
+	lines = append(lines, StyleHelp.Render("[Enter] connect  |  [a] add   [d] discover   [R] remove"))
 	lines = append(lines, StyleHelp.Render("[Q] quit"))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))

@@ -14,7 +14,7 @@ pxve/
 ├── go.mod / go.sum
 ├── cli/                             # Cobra command layer (thin: parse → action → format)
 │   ├── root.go                      # Root command, global flags, initClient(), handleErr(), --tui launch
-│   ├── instance.go                  # instance add/remove/list/use/show + verifyInstance()
+│   ├── instance.go                  # instance add/remove/list/use/show/discover + verifyInstance()
 │   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot
 │   ├── container.go                 # ct list/start/stop/shutdown/reboot/info/clone/delete/snapshot
 │   ├── backup.go                    # backup storages/list/create/delete/restore/info
@@ -25,7 +25,8 @@ pxve/
 │   └── output.go                    # watchTask(), formatBytes(), formatUptime(), formatCPUPercent()
 ├── tui/                             # Bubble Tea interactive TUI (launched via pxve --tui)
 │   ├── tui.go                       # appModel router, screen enum, LaunchTUI() entry point
-│   ├── selector.go                  # Instance picker + inline add/remove instance form
+│   ├── selector.go                  # Instance picker + inline add/remove/discover instance form
+│   ├── discover.go                  # tea.Cmd wrapper around internal/discovery for the TUI
 │   ├── list.go                      # VM + CT list table with auto-refresh, power/clone/delete
 │   ├── detail.go                    # VM/CT detail: info, power, clone, delete, snapshots, backups
 │   ├── users.go                     # Proxmox user list + inline create/delete
@@ -36,6 +37,7 @@ pxve/
 │   ├── config/config.go             # Load/Save ~/.pxve.yaml via yaml.v3 (NOT viper)
 │   ├── client/client.go             # Build proxmox.Client from InstanceConfig
 │   ├── errors/errors.go             # Handle() maps sentinel errors to friendly messages
+│   ├── discovery/discovery.go       # Network scan for Proxmox instances (shared by CLI + TUI)
 │   └── actions/                     # All Proxmox logic — shared by CLI and TUI
 │       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
 │       ├── container.go             # ListContainers, FindContainer, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
@@ -109,6 +111,30 @@ pxve/
 - `watchTask(ctx, w, task)` streams `task.Watch()` log lines and filters out blank
   lines and `"no content"` entries that Proxmox emits for fast operations.
 - Falls back to `task.WaitFor(ctx, ...)` if Watch fails.
+
+### Instance discovery (`internal/discovery/discovery.go`)
+
+The `discovery` package is shared by both the CLI (`pxve instance discover`) and the TUI
+selector screen (`d` key). Key entry points:
+
+- `Scan(subnets []string) (*Result, error)` — TCP-scans port 8006 across all given /24 CIDRs
+  (50 concurrent goroutines, 800 ms timeout per host), then HTTPS-verifies each open port
+  against `/api2/json/version`. Returns `Result{Instances, Subnets}` where `Subnets` is the
+  resolved list actually scanned (useful for "nothing found on X, Y" messages). If `subnets`
+  is empty, `LocalSubnets()` is used automatically.
+- `NormalizeSubnet(s string) (string, error)` — accepts an IP (`172.20.20.5`), a partial prefix
+  (`172.20.20`), or a CIDR (`172.20.20.0/24`) and returns a canonical `/24` CIDR string.
+- `LocalSubnets() ([]string, error)` — returns `/24` CIDRs for all active, non-loopback
+  IPv4 interfaces on the local machine.
+
+**Important**: Proxmox's `/api2/json/version` endpoint requires authentication (returns 401),
+so the version field is not collected. Any HTTP response on port 8006 over HTTPS is treated
+as confirmation the host is a Proxmox instance.
+
+**Subnet scoping**: Discovery only finds instances reachable from the local machine's routing
+table. If Proxmox lives on a different network (e.g. `172.20.20.0/24` while the local machine
+is on `172.99.99.0/24`), that subnet must be specified explicitly — local auto-detection will
+not find it.
 
 ### Instance add validation (`cli/instance.go`)
 - Token-id format is validated with `tokenIDRegex` (`^[^@]+@[^!]+![^!]+$`) before
@@ -199,7 +225,7 @@ per screen:
 
 | Screen           | Model             | File             | Purpose                                          |
 |------------------|-------------------|------------------|--------------------------------------------------|
-| `screenSelector` | `selectorModel`   | `selector.go`    | Pick / add / remove Proxmox instances from config |
+| `screenSelector` | `selectorModel`   | `selector.go`    | Pick / add / remove / discover Proxmox instances |
 | `screenList`     | `listModel`       | `list.go`        | Table of all VMs + CTs, power actions, clone, delete |
 | `screenUsers`    | `usersModel`      | `users.go`       | Table of Proxmox users + create / delete          |
 | `screenBackups`  | `backupsScreenModel` | `backups.go`  | Cluster-wide backup list + delete + restore        |
@@ -209,14 +235,14 @@ per screen:
 ### Navigation flow
 
 ```
-Selector ──Enter──▸ List ──Enter──▸ Detail
-                     │ Tab             │
-                     ▼                 │ Esc
-                   Users ──Enter──▸ UserDetail
-                     │ Tab             │
-                     ▼                 Esc
-                   Backups             ▼
-                     │ Tab           Users
+Selector ──Enter──▸ List ──Enter──▸ Detail──▸ Esc
+                     │ Tab
+                     ▼
+                   Users ──Enter──▸ UserDetail──▸ Esc
+                     │ Tab
+                     ▼
+                   Backups
+                     │ Tab
                      ▼
                     List
 ```
@@ -246,6 +272,12 @@ Selector ──Enter──▸ List ──Enter──▸ Detail
   `reloadSnapshotsMsg` / `reloadBackupsMsg` / `usersActionMsg` /
   `userDetailActionMsg` that shows a status message and triggers an automatic
   list reload.
+- **Selector key bindings**: On the instance selector screen, `a` opens the inline
+  add-instance form, `d` opens a subnet input prompt and then scans for Proxmox
+  instances (Enter with empty input scans local subnets; accepts partial prefix,
+  full IP, or CIDR), `R` opens the remove-instance confirmation, and Enter connects
+  to the selected instance. Discovery results appear in a table; selecting one
+  pre-populates the add form with the discovered URL.
 - **Key binding convention**: Resource actions (power, clone, delete) use plain
   letter keys — non-destructive are lowercase (`s` start, `c` clone),
   destructive are uppercase (`S` stop, `U` shutdown, `R` reboot, `D` delete).
@@ -342,5 +374,18 @@ make tidy           # go mod tidy
 make clean          # remove dist/
 ```
 
-Binaries are fully static (`CGO_ENABLED=0`). Version is injected via
-`-X main.version=$(git describe --tags --always --dirty)`, defaulting to `dev`.
+Binaries are fully static (`CGO_ENABLED=0`). The version string is hardcoded in
+`cli/root.go` as `var version = "x.y.z"` and requires no build-time flags.
+
+---
+
+## Release
+
+When the user requests release notes after completing an implementation:
+
+1. **Ask the user what version number to release** — do not assume or auto-increment.
+2. Once the user provides the version, update `var version` in `cli/root.go`:
+   ```go
+   var version = "<new-version>"
+   ```
+3. Confirm the build passes with `make build` and that `pxve --version` prints the new version.
