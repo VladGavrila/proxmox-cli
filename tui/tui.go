@@ -14,6 +14,7 @@ const (
 	screenSelector   screen = iota
 	screenList               // VMs / containers
 	screenUsers              // Proxmox users
+	screenBackups            // cluster-wide backups
 	screenDetail             // VM / CT detail + snapshots
 	screenUserDetail         // User detail + tokens + ACLs
 )
@@ -50,6 +51,7 @@ type appModel struct {
 	selector   selectorModel
 	list       listModel
 	users      usersModel
+	backups    backupsScreenModel
 	detail     detailModel
 	userDetail userDetailModel
 
@@ -84,6 +86,8 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.list.height = msg.Height
 		a.users.width = msg.Width
 		a.users.height = msg.Height
+		a.backups.width = msg.Width
+		a.backups.height = msg.Height
 		a.detail.width = msg.Width
 		a.detail.height = msg.Height
 		a.userDetail.width = msg.Width
@@ -93,6 +97,9 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !a.users.loading && len(a.users.users) > 0 {
 			a.users = a.users.withRebuiltTable()
+		}
+		if !a.backups.loading && len(a.backups.backups) > 0 {
+			a.backups = a.backups.withRebuiltTable()
 		}
 		if !a.detail.loading {
 			a.detail = a.detail.withRebuiltTable()
@@ -116,17 +123,26 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.list = a.list.withRebuiltTable()
 			}
 			a.users = usersModel{}
+			a.backups = backupsScreenModel{}
 			return a, nil
 		}
 
 		a.list = newListModel(msg.client, msg.name, a.width, a.height)
-		a.users = usersModel{} // reset so Tab re-fetches on the new instance
+		a.users = usersModel{}
+		a.backups = backupsScreenModel{}
 		return a, a.list.init()
 
 	case resourceSelectedMsg:
 		a.screen = screenDetail
 		a.detail = newDetailModel(a.list.client, msg.resource, a.width, a.height)
 		return a, a.detail.init()
+
+	case resourceDeletedMsg:
+		a.screen = screenList
+		// Invalidate the list cache so the deleted resource disappears.
+		delete(a.listCache, a.list.instName)
+		a.list = newListModel(a.list.client, a.list.instName, a.width, a.height)
+		return a, a.list.init()
 
 	case userSelectedMsg:
 		a.screen = screenUserDetail
@@ -139,8 +155,11 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 
 		case "Q":
-			// Let 'Q' pass through to sub-model when it's in a text-input mode.
-			if a.screen == screenDetail && a.detail.mode == detailInputName {
+			// Let 'Q' pass through to sub-model when it's in a non-normal mode.
+			if a.screen == screenList && a.list.mode != listNormal {
+				break
+			}
+			if a.screen == screenDetail && a.detail.mode != detailNormal {
 				break
 			}
 			if a.screen == screenUserDetail && a.userDetail.mode != userDetailNormal {
@@ -152,9 +171,19 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.screen == screenUsers && a.users.mode != usersNormal {
 				break
 			}
+			if a.screen == screenBackups && a.backups.mode != backupsScreenNormal {
+				break
+			}
 			return a, tea.Quit
 
 		case "tab":
+			// Don't switch screens when a sub-model is in a non-normal mode.
+			if a.screen == screenList && a.list.mode != listNormal {
+				break
+			}
+			if a.screen == screenBackups && a.backups.mode != backupsScreenNormal {
+				break
+			}
 			switch a.screen {
 			case screenList:
 				a.screen = screenUsers
@@ -164,6 +193,13 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, nil
 			case screenUsers:
+				a.screen = screenBackups
+				if a.backups.client == nil {
+					a.backups = newBackupsScreenModel(a.list.client, a.list.instName, a.width, a.height)
+					return a, a.backups.init()
+				}
+				return a, nil
+			case screenBackups:
 				a.screen = screenList
 				return a, nil
 			}
@@ -183,12 +219,24 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.screen = screenList
 				return a, nil
 			case screenList:
+				if a.list.mode != listNormal {
+					break // let list handle dialog dismissal
+				}
 				a.listCache[a.list.instName] = a.list
 				a.selector.current = a.list.instName
 				a.selector.table = a.selector.buildTable()
 				a.screen = screenSelector
 				return a, nil
 			case screenUsers:
+				a.listCache[a.list.instName] = a.list
+				a.selector.current = a.list.instName
+				a.selector.table = a.selector.buildTable()
+				a.screen = screenSelector
+				return a, nil
+			case screenBackups:
+				if a.backups.mode != backupsScreenNormal {
+					break // let backups handle dialog dismissal
+				}
 				a.listCache[a.list.instName] = a.list
 				a.selector.current = a.list.instName
 				a.selector.table = a.selector.buildTable()
@@ -208,6 +256,8 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.list, cmd = a.list.update(msg)
 	case screenUsers:
 		a.users, cmd = a.users.update(msg)
+	case screenBackups:
+		a.backups, cmd = a.backups.update(msg)
 	case screenDetail:
 		a.detail, cmd = a.detail.update(msg)
 	case screenUserDetail:
@@ -224,6 +274,8 @@ func (a appModel) View() string {
 		return a.list.view()
 	case screenUsers:
 		return a.users.view()
+	case screenBackups:
+		return a.backups.view()
 	case screenDetail:
 		return a.detail.view()
 	case screenUserDetail:

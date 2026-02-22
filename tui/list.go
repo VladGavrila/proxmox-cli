@@ -4,14 +4,26 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	proxmox "github.com/luthermonson/go-proxmox"
+
+	"github.com/chupakbra/proxmox-cli/internal/actions"
+)
+
+type listMode int
+
+const (
+	listNormal        listMode = iota
+	listConfirmDelete          // waiting for Enter/Esc to confirm resource delete
+	listCloneInput             // text inputs for clone VMID + name
 )
 
 // resourcesFetchedMsg is sent when the async fetch of VMs and containers completes.
@@ -31,8 +43,18 @@ type listModel struct {
 	spinner       spinner.Model
 	lastRefreshed time.Time
 	fetchID       int64
-	width         int
-	height        int
+	mode          listMode
+	statusMsg     string
+	statusErr     bool
+	actionBusy    bool
+
+	// Clone input state
+	cloneIDInput   textinput.Model
+	cloneNameInput textinput.Model
+	cloneField     int // 0 = VMID, 1 = name
+
+	width  int
+	height int
 }
 
 func newListModel(c *proxmox.Client, instName string, w, h int) listModel {
@@ -40,14 +62,25 @@ func newListModel(c *proxmox.Client, instName string, w, h int) listModel {
 	s.Spinner = CLISpinner
 	s.Style = StyleSpinner
 
+	cidInput := textinput.New()
+	cidInput.Placeholder = "new VMID"
+	cidInput.CharLimit = 10
+	cidInput.Width = 12
+
+	cnameInput := textinput.New()
+	cnameInput.Placeholder = "clone name"
+	cnameInput.CharLimit = 63
+
 	return listModel{
-		client:   c,
-		instName: instName,
-		loading:  true,
-		spinner:  s,
-		fetchID:  time.Now().UnixNano(),
-		width:    w,
-		height:   h,
+		client:         c,
+		instName:       instName,
+		loading:        true,
+		spinner:        s,
+		fetchID:        time.Now().UnixNano(),
+		cloneIDInput:   cidInput,
+		cloneNameInput: cnameInput,
+		width:          w,
+		height:         h,
 	}
 }
 
@@ -102,7 +135,7 @@ func (m listModel) withRebuiltTable() listModel {
 		}
 	}
 
-	tableHeight := m.height - 8 // padding(2) + title(1) + blank(1) + help(2) + table border(2)
+	tableHeight := m.height - 11 // padding(2) + title(1) + blank(1) + status(1) + actions(1) + help(2) + table border(2) + margin(1)
 	if tableHeight < 3 {
 		tableHeight = 3
 	}
@@ -139,6 +172,7 @@ func (m listModel) update(msg tea.Msg) (listModel, tea.Cmd) {
 			return m, nil // stale response from a previous instance; discard
 		}
 		m.loading = false
+		m.actionBusy = false
 		if msg.err != nil {
 			m.err = msg.err
 			return m, nil
@@ -149,15 +183,163 @@ func (m listModel) update(msg tea.Msg) (listModel, tea.Cmd) {
 		m = m.withRebuiltTable()
 		return m, nil
 
+	case actionResultMsg:
+		m.actionBusy = false
+		if msg.err != nil {
+			m.statusMsg = "Error: " + msg.err.Error()
+			m.statusErr = true
+			return m, nil
+		}
+		m.statusMsg = msg.message
+		m.statusErr = false
+		if msg.needRefresh {
+			m.loading = true
+			m.fetchID = time.Now().UnixNano()
+			return m, tea.Batch(fetchAllResources(m.client, m.fetchID), m.spinner.Tick)
+		}
+		return m, nil
+
+	case cloneNextIDMsg:
+		if msg.err != nil {
+			m.statusMsg = "Error: " + msg.err.Error()
+			m.statusErr = true
+			m.mode = listNormal
+			return m, nil
+		}
+		r := m.selectedResource()
+		if r == nil {
+			m.mode = listNormal
+			return m, nil
+		}
+		m.cloneIDInput.SetValue(fmt.Sprintf("%d", msg.id))
+		m.cloneNameInput.SetValue("")
+		m.cloneField = 0
+		m.cloneIDInput.Focus()
+		m.cloneNameInput.Blur()
+		m.mode = listCloneInput
+		return m, textinput.Blink
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if m.loading {
+		if m.loading || m.actionBusy {
 			return m, cmd
 		}
 		return m, nil
 
 	case tea.KeyMsg:
+		// Clone input mode.
+		if m.mode == listCloneInput {
+			switch msg.String() {
+			case "esc":
+				m.mode = listNormal
+				m.cloneIDInput.Reset()
+				m.cloneNameInput.Reset()
+				m.cloneIDInput.Blur()
+				m.cloneNameInput.Blur()
+				m.statusMsg = ""
+				m.statusErr = false
+				m.loading = true
+				m.fetchID = time.Now().UnixNano()
+				return m, tea.Batch(fetchAllResources(m.client, m.fetchID), m.spinner.Tick)
+			case "tab", "down":
+				if m.cloneField == 0 {
+					m.cloneField = 1
+					m.cloneIDInput.Blur()
+					m.cloneNameInput.Focus()
+					return m, textinput.Blink
+				}
+				m.cloneField = 0
+				m.cloneNameInput.Blur()
+				m.cloneIDInput.Focus()
+				return m, textinput.Blink
+			case "shift+tab", "up":
+				if m.cloneField == 1 {
+					m.cloneField = 0
+					m.cloneNameInput.Blur()
+					m.cloneIDInput.Focus()
+					return m, textinput.Blink
+				}
+				m.cloneField = 1
+				m.cloneIDInput.Blur()
+				m.cloneNameInput.Focus()
+				return m, textinput.Blink
+			case "enter":
+				if m.cloneField == 0 {
+					// Validate VMID and advance to name field.
+					idStr := strings.TrimSpace(m.cloneIDInput.Value())
+					if idStr == "" {
+						return m, nil
+					}
+					vmid, err := strconv.Atoi(idStr)
+					if err != nil || vmid < 100 {
+						m.statusMsg = "Invalid VMID (must be >= 100)"
+						m.statusErr = true
+						return m, nil
+					}
+					_ = vmid
+					m.cloneField = 1
+					m.cloneIDInput.Blur()
+					m.cloneNameInput.Focus()
+					return m, textinput.Blink
+				}
+				// Field 1 (name): submit clone.
+				idStr := strings.TrimSpace(m.cloneIDInput.Value())
+				name := strings.TrimSpace(m.cloneNameInput.Value())
+				m.cloneIDInput.Blur()
+				m.cloneNameInput.Blur()
+				vmid, _ := strconv.Atoi(idStr)
+				if name == "" {
+					r := m.selectedResource()
+					if r != nil {
+						name = r.Name + "-clone"
+					}
+				}
+				m.mode = listNormal
+				m.actionBusy = true
+				m.statusMsg = "Cloning..."
+				m.statusErr = false
+				return m, tea.Batch(m.listCloneResourceCmd(vmid, name), m.spinner.Tick)
+			default:
+				var cmd tea.Cmd
+				if m.cloneField == 0 {
+					m.cloneIDInput, cmd = m.cloneIDInput.Update(msg)
+				} else {
+					m.cloneNameInput, cmd = m.cloneNameInput.Update(msg)
+				}
+				return m, cmd
+			}
+		}
+
+		// Confirm delete mode.
+		if m.mode == listConfirmDelete {
+			switch msg.String() {
+			case "enter":
+				m.mode = listNormal
+				r := m.selectedResource()
+				if r == nil {
+					return m, nil
+				}
+				typeStr := "VM"
+				if r.Type == "lxc" {
+					typeStr = "CT"
+				}
+				m.actionBusy = true
+				m.statusMsg = fmt.Sprintf("Deleting %s %d...", typeStr, r.VMID)
+				m.statusErr = false
+				return m, tea.Batch(m.listDeleteResourceCmd(), m.spinner.Tick)
+			case "esc":
+				m.mode = listNormal
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// Normal mode: ignore keys during an in-flight action.
+		if m.actionBusy {
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "enter":
 			if len(m.resources) == 0 {
@@ -170,9 +352,54 @@ func (m listModel) update(msg tea.Msg) (listModel, tea.Cmd) {
 					return resourceSelectedMsg{resource: r}
 				}
 			}
+		case "s":
+			if m.selectedResource() == nil {
+				return m, nil
+			}
+			m.actionBusy = true
+			m.statusMsg = fmt.Sprintf("%d: Starting...", m.selectedResource().VMID)
+			m.statusErr = false
+			return m, tea.Batch(m.listPowerCmd("start"), m.spinner.Tick)
+		case "S":
+			if m.selectedResource() == nil {
+				return m, nil
+			}
+			m.actionBusy = true
+			m.statusMsg = fmt.Sprintf("%d: Stopping...", m.selectedResource().VMID)
+			m.statusErr = false
+			return m, tea.Batch(m.listPowerCmd("stop"), m.spinner.Tick)
+		case "U":
+			if m.selectedResource() == nil {
+				return m, nil
+			}
+			m.actionBusy = true
+			m.statusMsg = fmt.Sprintf("%d: Shutting down...", m.selectedResource().VMID)
+			m.statusErr = false
+			return m, tea.Batch(m.listPowerCmd("shutdown"), m.spinner.Tick)
+		case "R":
+			if m.selectedResource() == nil {
+				return m, nil
+			}
+			m.actionBusy = true
+			m.statusMsg = fmt.Sprintf("%d: Rebooting...", m.selectedResource().VMID)
+			m.statusErr = false
+			return m, tea.Batch(m.listPowerCmd("reboot"), m.spinner.Tick)
+		case "c":
+			if m.selectedResource() == nil {
+				return m, nil
+			}
+			return m, m.loadCloneNextIDCmd()
+		case "D":
+			if m.selectedResource() == nil {
+				return m, nil
+			}
+			m.mode = listConfirmDelete
+			return m, nil
 		case "ctrl+r":
 			m.loading = true
 			m.err = nil
+			m.statusMsg = ""
+			m.statusErr = false
 			m.fetchID = time.Now().UnixNano()
 			return m, tea.Batch(fetchAllResources(m.client, m.fetchID), m.spinner.Tick)
 		}
@@ -213,10 +440,192 @@ func (m listModel) view() string {
 		headerLine(title+count, m.width, m.lastRefreshed),
 		"",
 		m.table.View(),
-		StyleHelp.Render("[Tab] users  |  [ctrl+r] refresh"),
-		StyleHelp.Render("[Esc] back   [Q] quit"),
 	}
+
+	// Status/spinner feedback line.
+	switch {
+	case m.actionBusy:
+		lines = append(lines, StyleWarning.Render(m.spinner.View()+" "+m.statusMsg))
+	case m.statusMsg != "" && m.statusErr:
+		lines = append(lines, StyleError.Render(m.statusMsg))
+	case m.statusMsg != "":
+		lines = append(lines, StyleSuccess.Render(m.statusMsg))
+	default:
+		lines = append(lines, "")
+	}
+
+	// Action hints or confirmation/input overlay.
+	switch m.mode {
+	case listConfirmDelete:
+		r := m.selectedResource()
+		if r != nil {
+			typeStr := "VM"
+			if r.Type == "lxc" {
+				typeStr = "CT"
+			}
+			lines = append(lines, StyleWarning.Render(
+				fmt.Sprintf("Delete %s %d (%s)? This cannot be undone. [Enter] confirm   [Esc] cancel", typeStr, r.VMID, r.Name),
+			))
+		}
+	case listCloneInput:
+		r := m.selectedResource()
+		if r != nil {
+			typeStr := "VM"
+			if r.Type == "lxc" {
+				typeStr = "CT"
+			}
+			lines = append(lines, StyleWarning.Render(fmt.Sprintf("Clone %s %d (%s)", typeStr, r.VMID, r.Name)))
+			idLabel := StyleDim.Render("  VMID: ")
+			nameLabel := StyleDim.Render("  Name: ")
+			if m.cloneField == 0 {
+				idLabel = StyleWarning.Render("> VMID: ")
+			} else {
+				nameLabel = StyleWarning.Render("> Name: ")
+			}
+			lines = append(lines, idLabel+m.cloneIDInput.View())
+			lines = append(lines, nameLabel+m.cloneNameInput.View())
+			lines = append(lines, StyleHelp.Render("[Tab] switch field  [Enter] confirm  [Esc] cancel"))
+		}
+	default:
+		lines = append(lines, StyleHelp.Render("[s] start  [S] stop  [U] shutdown  [R] reboot  [c] clone  [D] delete"))
+	}
+
+	lines = append(lines, StyleHelp.Render("[Tab] users / backups  |  [ctrl+r] refresh"))
+	lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
 	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
+}
+
+func (m listModel) selectedResource() *proxmox.ClusterResource {
+	if len(m.resources) == 0 {
+		return nil
+	}
+	cursor := m.table.Cursor()
+	if cursor < 0 || cursor >= len(m.resources) {
+		return nil
+	}
+	return m.resources[cursor]
+}
+
+func (m listModel) listPowerCmd(action string) tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	res := *r
+	return func() tea.Msg {
+		ctx := context.Background()
+		var task *proxmox.Task
+		var err error
+		vmid := int(res.VMID)
+
+		if res.Type == "qemu" {
+			switch action {
+			case "start":
+				task, err = actions.StartVM(ctx, c, vmid, res.Node)
+			case "stop":
+				task, err = actions.StopVM(ctx, c, vmid, res.Node)
+			case "shutdown":
+				task, err = actions.ShutdownVM(ctx, c, vmid, res.Node)
+			case "reboot":
+				task, err = actions.RebootVM(ctx, c, vmid, res.Node)
+			}
+		} else {
+			switch action {
+			case "start":
+				task, err = actions.StartContainer(ctx, c, vmid, res.Node)
+			case "stop":
+				task, err = actions.StopContainer(ctx, c, vmid, res.Node)
+			case "shutdown":
+				task, err = actions.ShutdownContainer(ctx, c, vmid, res.Node)
+			case "reboot":
+				task, err = actions.RebootContainer(ctx, c, vmid, res.Node)
+			}
+		}
+
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if task != nil {
+			if werr := task.WaitFor(ctx, 300); werr != nil {
+				return actionResultMsg{err: werr}
+			}
+		}
+		return actionResultMsg{message: fmt.Sprintf("%d: %s completed", vmid, action), needRefresh: true}
+	}
+}
+
+func (m listModel) listDeleteResourceCmd() tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	res := *r
+	return func() tea.Msg {
+		ctx := context.Background()
+		var task *proxmox.Task
+		var err error
+		vmid := int(res.VMID)
+
+		if res.Type == "qemu" {
+			task, err = actions.DeleteVM(ctx, c, vmid, res.Node)
+		} else {
+			task, err = actions.DeleteContainer(ctx, c, vmid, res.Node)
+		}
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if task != nil {
+			if werr := task.WaitFor(ctx, 300); werr != nil {
+				return actionResultMsg{err: werr}
+			}
+		}
+		typeStr := "VM"
+		if res.Type == "lxc" {
+			typeStr = "CT"
+		}
+		return actionResultMsg{message: fmt.Sprintf("%s %d deleted", typeStr, vmid), needRefresh: true}
+	}
+}
+
+func (m listModel) loadCloneNextIDCmd() tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		ctx := context.Background()
+		id, err := actions.NextID(ctx, c)
+		return cloneNextIDMsg{id: id, err: err}
+	}
+}
+
+func (m listModel) listCloneResourceCmd(newid int, name string) tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	res := *r
+	return func() tea.Msg {
+		ctx := context.Background()
+		vmid := int(res.VMID)
+		var assignedID int
+		var task *proxmox.Task
+		var err error
+		if res.Type == "qemu" {
+			assignedID, task, err = actions.CloneVM(ctx, c, vmid, newid, res.Node, name)
+		} else {
+			assignedID, task, err = actions.CloneContainer(ctx, c, vmid, newid, res.Node, name)
+		}
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if task != nil {
+			if werr := task.WaitFor(ctx, 600); werr != nil {
+				return actionResultMsg{err: werr}
+			}
+		}
+		return actionResultMsg{message: fmt.Sprintf("Cloned to VMID %d", assignedID), needRefresh: true}
+	}
 }
 
 // fetchAllResources fetches all VMs and containers in one API call and sorts by VMID.

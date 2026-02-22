@@ -160,6 +160,7 @@ func CloneContainer(ctx context.Context, c *proxmox.Client, ctid, newid int, nod
 	clonedID, task, err := ct.Clone(ctx, &proxmox.ContainerCloneOptions{
 		NewID:    newid,
 		Hostname: name,
+		Full:     1,
 	})
 	return clonedID, task, err
 }

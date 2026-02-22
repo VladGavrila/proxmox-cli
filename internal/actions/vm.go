@@ -150,6 +150,7 @@ func CloneVM(ctx context.Context, c *proxmox.Client, vmid, newid int, nodeName, 
 	clonedID, task, err := vm.Clone(ctx, &proxmox.VirtualMachineCloneOptions{
 		NewID: newid,
 		Name:  name,
+		Full:  1,
 	})
 	return clonedID, task, err
 }

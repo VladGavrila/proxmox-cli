@@ -6,12 +6,13 @@ containers, nodes, users, and access control.
 ## Features
 
 - **VMs & containers** — list, start, stop, reboot, shutdown, clone, delete, snapshots
+- **Backups** — list, create (vzdump), delete, restore, inspect embedded config, storage discovery
 - **Nodes & cluster** — status, resources, running tasks
 - **Users & tokens** — create, delete, password, API token management
 - **ACLs** — grant and revoke roles on VMs, containers, or arbitrary paths
 - **Multi-instance** — manage multiple Proxmox servers with named profiles
 - **Output formats** — human-readable tables or `--output json`
-- **Interactive TUI** — full-screen terminal UI for browsing and managing instances, VMs, containers, users, and snapshots
+- **Interactive TUI** — full-screen terminal UI for browsing and managing instances, VMs, containers, backups, users, and snapshots
 
 ## Quick Start
 
@@ -34,6 +35,16 @@ pxve vm start 101
 # Take a snapshot
 pxve vm snapshot create 101 before-upgrade
 
+# Create a backup
+pxve backup create 101 --storage local
+
+# List backups
+pxve backup list --vmid 101
+
+# Restore a backup to a new VM
+pxve backup restore local:backup/vzdump-qemu-101-2025_01_01-00_00_00.vma.zst \
+  --node pve --vmid 200 --name restored-vm --storage local-lvm
+
 # Create a user and grant VM access
 pxve user create alice@pve --password secret
 pxve user grant alice@pve --vmid 101 --role PVEVMUser
@@ -53,13 +64,19 @@ profiles from `~/.pxve.yaml` and lets you:
 
 - **Select an instance** — pick from configured instances, add or remove instances inline
 - **Browse VMs & containers** — sortable table with status, CPU, memory, and disk usage
+- **Power actions** — start, stop, shutdown, reboot, clone, and delete directly from the list or detail view
 - **Manage snapshots** — create, delete, and rollback snapshots from the detail view
-- **Power actions** — start, stop, shutdown, and reboot directly from the detail view
+- **Manage backups** — create, delete, and restore backups with storage selection and VMID/name prompts
+- **Browse all backups** — cluster-wide backup view across all nodes and storages with delete and restore
 - **Manage users** — list, create, and delete Proxmox users
 - **Manage tokens & ACLs** — create/delete API tokens, grant/revoke ACL roles per user
 
-Navigation: **Enter** to select, **Esc** to go back, **Tab** to switch between
-VMs and Users views, **Q** or **Ctrl+C** to quit.
+Navigation: **Enter** to select, **Esc** to go back, **Tab** to cycle between
+VMs, Users, and Backups views, **Q** or **Ctrl+C** to quit.
+
+Key bindings use plain letters for resource actions (lowercase for safe
+actions, uppercase for destructive) and **Alt/Option+key** for
+snapshot/backup actions. See the on-screen hints for available shortcuts.
 
 ## Instance Management
 
@@ -121,7 +138,29 @@ pxve vm | ct  snapshot delete   <id> <name> [--node <node>]
 
 > **Note:** `vm shutdown` sends an ACPI signal (guest-initiated). `ct shutdown`
 > sends an orderly shutdown request to the container runtime. Both are graceful;
-> `stop` is always forceful.
+> `stop` is always forceful. Clones are always **full clones** (independent of
+> the source).
+
+### Backups
+
+```
+pxve backup storages                       [--node <node>]
+pxve backup list                           [--node <node>] [--storage <s>] [--vmid <id>]
+pxve backup create  <vmid>                 [--node <node>] [--storage <s>] [--mode snapshot] [--compress zstd]
+pxve backup delete  <volid>  --node <node> [--storage <s>]
+pxve backup restore <volid>  --node <node> [--vmid <id>] [--name <name>] [--storage <s>]
+pxve backup info    <volid>  --node <node>
+```
+
+- `storages` lists backup-capable storages with available/used/total space.
+- `create` runs a vzdump backup. Node is auto-resolved from the VMID if omitted.
+  Default mode is `snapshot`, default compression is `zstd`.
+- `restore` recreates a VM or CT from a backup archive. VM vs CT is auto-detected
+  from the volid. If `--vmid` is omitted, the next available ID is used. `--name`
+  sets the VM name or CT hostname (defaults to the name embedded in the backup).
+  `--storage` specifies where to place restored disks (must support `images` for VMs
+  or `rootdir` for CTs, e.g. `local-lvm`).
+- `info` extracts and displays the hardware configuration embedded in a backup.
 
 ### Nodes & Cluster
 

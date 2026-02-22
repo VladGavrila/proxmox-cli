@@ -99,6 +99,7 @@ func Execute(version string) {
 	rootCmd.AddCommand(userCmd())
 	rootCmd.AddCommand(aclCmd())
 	rootCmd.AddCommand(roleCmd())
+	rootCmd.AddCommand(backupCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)

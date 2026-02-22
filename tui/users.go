@@ -368,7 +368,7 @@ func (m usersModel) view() string {
 		} else {
 			lines = append(lines, "")
 		}
-		lines = append(lines, StyleHelp.Render("[a] add   [d] delete  |  [Tab] list  |  [ctrl+r] refresh"))
+		lines = append(lines, StyleHelp.Render("[a] add   [d] delete  |  [Tab] backups  |  [ctrl+r] refresh"))
 		lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
 	}
 

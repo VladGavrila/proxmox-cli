@@ -17,6 +17,7 @@ pxve/
 │   ├── instance.go                  # instance add/remove/list/use/show + verifyInstance()
 │   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot
 │   ├── container.go                 # ct list/start/stop/shutdown/reboot/info/clone/delete/snapshot
+│   ├── backup.go                    # backup storages/list/create/delete/restore/info
 │   ├── node.go                      # node list/info
 │   ├── cluster.go                   # cluster status/resources/tasks
 │   ├── user.go                      # user list/create/delete/password/grant/revoke/token
@@ -25,9 +26,10 @@ pxve/
 ├── tui/                             # Bubble Tea interactive TUI (launched via pxve --tui)
 │   ├── tui.go                       # appModel router, screen enum, LaunchTUI() entry point
 │   ├── selector.go                  # Instance picker + inline add/remove instance form
-│   ├── list.go                      # VM + CT list table with auto-refresh
-│   ├── detail.go                    # VM/CT detail: info, power actions, snapshot CRUD
+│   ├── list.go                      # VM + CT list table with auto-refresh, power/clone/delete
+│   ├── detail.go                    # VM/CT detail: info, power, clone, delete, snapshots, backups
 │   ├── users.go                     # Proxmox user list + inline create/delete
+│   ├── backups.go                   # Cluster-wide backup list + inline delete
 │   ├── userdetail.go                # User detail: tokens + ACLs, create/delete/grant/revoke
 │   └── styles.go                    # Shared lipgloss styles, headerLine(), CLISpinner
 ├── internal/
@@ -37,6 +39,7 @@ pxve/
 │   └── actions/                     # All Proxmox logic — shared by CLI and TUI
 │       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
 │       ├── container.go             # ListContainers, FindContainer, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
+│       ├── backup.go               # ListBackupStorages, ListBackups, CreateBackup, DeleteBackup, RestoreBackup, BackupConfig, NextID
 │       ├── node.go                  # ListNodes, GetNode
 │       ├── cluster.go               # GetCluster, ClusterResources, ClusterTasks
 │       └── access.go                # ListUsers/Tokens/ACLs/Roles, Create/Delete, Grant/Revoke
@@ -94,6 +97,13 @@ pxve/
   does not expose this method on `VirtualMachine`.
 - `CloneVM` calls `c.Cluster().NextID()` to auto-assign the next available VMID when
   `newid == 0`.
+- **Backup actions** (`backup.go`): `ListBackupStorages` filters storages by `backup`
+  content type. `ListRestoreStorages` filters by `images` (qemu) or `rootdir` (lxc)
+  content type — these are distinct because backup-capable storages (e.g. `local`)
+  often cannot hold VM disks or container rootfs. `RestoreBackup` uses raw
+  `c.Post()` to `/nodes/{node}/qemu` (with `archive` + `name`) or
+  `/nodes/{node}/lxc` (with `ostemplate` + `restore=1` + `hostname`).
+  `NextID` is a convenience wrapper around `Cluster.NextID()`.
 
 ### Task watching (`cli/output.go`)
 - `watchTask(ctx, w, task)` streams `task.Watch()` log lines and filters out blank
@@ -184,15 +194,16 @@ Bubbles v0.18.0 and Lipgloss v0.9.1.
 
 ### Architecture
 
-A single **router model** (`appModel` in `tui/tui.go`) owns five sub-models, one
+A single **router model** (`appModel` in `tui/tui.go`) owns six sub-models, one
 per screen:
 
 | Screen           | Model             | File             | Purpose                                          |
 |------------------|-------------------|------------------|--------------------------------------------------|
 | `screenSelector` | `selectorModel`   | `selector.go`    | Pick / add / remove Proxmox instances from config |
-| `screenList`     | `listModel`       | `list.go`        | Table of all VMs + CTs for the connected instance |
+| `screenList`     | `listModel`       | `list.go`        | Table of all VMs + CTs, power actions, clone, delete |
 | `screenUsers`    | `usersModel`      | `users.go`       | Table of Proxmox users + create / delete          |
-| `screenDetail`   | `detailModel`     | `detail.go`      | VM/CT info, power actions, snapshot CRUD           |
+| `screenBackups`  | `backupsScreenModel` | `backups.go`  | Cluster-wide backup list + delete + restore        |
+| `screenDetail`   | `detailModel`     | `detail.go`      | VM/CT info, power, clone, delete, snapshots, backups |
 | `screenUserDetail` | `userDetailModel` | `userdetail.go` | User info, token CRUD, ACL grant/revoke           |
 
 ### Navigation flow
@@ -202,14 +213,16 @@ Selector ──Enter──▸ List ──Enter──▸ Detail
                      │ Tab             │
                      ▼                 │ Esc
                    Users ──Enter──▸ UserDetail
-                     │                 │
-                     Esc               Esc
-                     ▼                 ▼
-                  Selector           Users
+                     │ Tab             │
+                     ▼                 Esc
+                   Backups             ▼
+                     │ Tab           Users
+                     ▼
+                    List
 ```
 
 - **Esc** goes back one screen (or dismisses an active dialog/overlay).
-- **Tab** toggles between the List and Users screens.
+- **Tab** cycles between List → Users → Backups → List.
 - **Q** / **Ctrl+C** quits (Q is passed through when a text input is active).
 
 ### Key patterns
@@ -229,9 +242,51 @@ Selector ──Enter──▸ List ──Enter──▸ Detail
   instances keyed by instance name. `listCache` stores `listModel` state so
   switching back to a previously visited instance is instant.
 - **Feedback + reload**: Mutating actions (snapshot create/delete, user
-  create/delete, token create/delete) emit a `reloadSnapshotsMsg` /
-  `usersActionMsg` / `userDetailActionMsg` that shows a status message and
-  triggers an automatic list reload.
+  create/delete, token create/delete, backup create/delete) emit a
+  `reloadSnapshotsMsg` / `reloadBackupsMsg` / `usersActionMsg` /
+  `userDetailActionMsg` that shows a status message and triggers an automatic
+  list reload.
+- **Key binding convention**: Resource actions (power, clone, delete) use plain
+  letter keys — non-destructive are lowercase (`s` start, `c` clone),
+  destructive are uppercase (`S` stop, `U` shutdown, `R` reboot, `D` delete).
+  Snapshot/backup actions require **Alt** (or **Option** on macOS):
+  `Alt+s` new snapshot, `Alt+d` delete, `Alt+r` rollback/restore,
+  `Alt+b` new backup. macOS Option key sends Unicode characters (`ß`, `∂`,
+  `®`, `∫`), so both `alt+<key>` and the Unicode variant are matched.
+- **List-level actions**: The list screen supports the same power actions,
+  clone, and delete-with-confirmation as the detail screen, operating on the
+  highlighted resource. Clone uses a `listCloneInput` mode with a 2-field
+  input form (VMID + name); delete uses a `listConfirmDelete` mode with
+  Enter/Esc confirmation. After any action, the list auto-refreshes via
+  `actionResultMsg{needRefresh: true}`. The `resourceDeletedMsg` is
+  handled by the router for the detail screen (navigates back to list).
+- **Detail tab bar**: The detail screen has two tabs (Snapshots and Backups),
+  toggled with Tab. Each tab has its own data, table, loading state, and
+  key bindings. Tab-specific keys (`Alt+s`/`Alt+d`/`Alt+r` for snapshots,
+  `Alt+b`/`Alt+d`/`Alt+r` for backups) only fire when the corresponding
+  tab is active.
+- **Multi-step restore flow**: Backup restore is a 3-step wizard:
+  (1) fetch next available ID → (2) `detailRestoreInputID` mode with two
+  text inputs (VMID pre-populated, name optional) → (3) storage selection
+  (`detailRestoreSelectStorage`) → execute. The VMID and name are carried
+  through via `pendingRestoreID` / `pendingRestoreName` fields. The same
+  flow exists on the top-level Backups screen (`backupsScreenRestoreInput`
+  → `backupsScreenRestoreStorage`).
+- **Clone flow**: Clone is a 2-step wizard on both list and detail screens:
+  (1) press `c` → silently fetch next available ID (`cloneNextIDMsg`) →
+  (2) show 2-field input form (VMID pre-filled, name pre-filled as
+  `{original-name}-clone`) → Enter to confirm → execute clone with spinner.
+  Uses a separate `cloneNextIDMsg` type (distinct from `nextIDLoadedMsg`
+  used by restore) to avoid routing ambiguity. Both screens share the same
+  message type defined in `detail.go`.
+- **Storage selection**: Both backup creation and restore show a storage
+  picker overlay when multiple candidate storages exist. If only one is
+  available, the picker is skipped and it's used directly. Backup creation
+  uses `ListBackupStorages` (content type `backup`); restore uses
+  `ListRestoreStorages` (content type `images` for VMs, `rootdir` for CTs).
+- **Clone behaviour**: Both VM and CT clones use **full clone** mode
+  (`Full: 1`) rather than linked clones, ensuring the clone is fully
+  independent of the source.
 
 ### Shared styles (`tui/styles.go`)
 
