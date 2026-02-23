@@ -148,21 +148,14 @@ pxve vm | ct  snapshot rollback <id> <name>     [--node <node>]
 pxve vm | ct  snapshot delete   <id> <name>     [--node <node>]
 ```
 
-> **Note:** `vm shutdown` sends an ACPI signal (guest-initiated). `ct shutdown`
-> sends an orderly shutdown request to the container runtime. Both are graceful;
-> `stop` is always forceful. Clones are always **full clones** (independent of
-> the source). `template` is **irreversible** — the VM or CT becomes read-only
-> and can only be cloned afterwards. Use `--force` to skip the confirmation prompt.
-> `disk resize` grows a disk by a delta — specify the amount and unit (e.g. `10G`,
-> `512M`); the `+` prefix is added automatically if omitted.
-> `disk move` moves a disk to a different storage; if the disk argument is omitted
-> and only one moveable disk exists it is auto-selected, otherwise a prompt is shown.
-> The source disk is deleted after the move by default (`--delete=false` to keep it).
-> Supports live migration on running VMs.
-> `disk detach` (VM only) removes a disk from the VM config. Without `--delete` the
-> data is preserved as an unused disk; with `--delete` it is permanently destroyed
-> (confirmation required unless `--force`).
-> `tag` names may contain letters, digits, hyphens, underscores, and dots.
+> **Notes:** 
+> * `vm shutdown` sends an ACPI signal (guest-initiated). `ct shutdown` sends an orderly shutdown request to the container runtime. Both are graceful, `stop` is always forceful.
+> * Clones are always **full clones** (independent of the source).
+> * `template` is **irreversible** — the VM or CT becomes read-only and can only be cloned afterwards. Use `--force` to skip the confirmation prompt.
+> * `disk resize` grows a disk by a delta — specify the amount and unit (e.g. `10G`, `512M`); the `+` prefix is added automatically if omitted.
+> * `disk move` moves a disk to a different storage; if the disk argument is omitted and only one moveable disk exists it is auto-selected, otherwise a prompt is shown. The source disk is deleted after the move by default (`--delete=false` to keep it). Supports live migration on running VMs.
+> * `disk detach` (VM only) removes a disk from the VM config. Without `--delete` the data is preserved as an unused disk; with `--delete` it is permanently destroyed (confirmation required unless `--force`).
+> * `tag` names may contain letters, digits, hyphens, underscores, and dots.
 
 ### Backups
 
