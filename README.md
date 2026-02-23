@@ -137,6 +137,8 @@ pxve vm | ct  clone    <id> <name>              [--node <node>] [--newid <id>]
 pxve vm | ct  delete   <id>                     [--node <node>]
 pxve vm | ct  template <id>                     [--node <node>] [--force]
 pxve vm | ct  disk resize <id> <disk> <size>    [--node <node>]
+pxve vm | ct  disk move   <id> [disk]           [--node <node>] --storage <s> [--delete=false] [--bwlimit <KiB/s>]
+pxve vm       disk detach <id> <disk>           [--node <node>] [--delete] [--force]
 pxve vm | ct  tag list   <id>                   [--node <node>]
 pxve vm | ct  tag add    <id> <tag>             [--node <node>]
 pxve vm | ct  tag remove <id> <tag>             [--node <node>]
@@ -153,6 +155,13 @@ pxve vm | ct  snapshot delete   <id> <name>     [--node <node>]
 > and can only be cloned afterwards. Use `--force` to skip the confirmation prompt.
 > `disk resize` grows a disk by a delta — specify the amount and unit (e.g. `10G`,
 > `512M`); the `+` prefix is added automatically if omitted.
+> `disk move` moves a disk to a different storage; if the disk argument is omitted
+> and only one moveable disk exists it is auto-selected, otherwise a prompt is shown.
+> The source disk is deleted after the move by default (`--delete=false` to keep it).
+> Supports live migration on running VMs.
+> `disk detach` (VM only) removes a disk from the VM config. Without `--delete` the
+> data is preserved as an unused disk; with `--delete` it is permanently destroyed
+> (confirmation required unless `--force`).
 > `tag` names may contain letters, digits, hyphens, underscores, and dots.
 
 ### Backups

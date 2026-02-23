@@ -15,14 +15,14 @@ pxve/
 ├── cli/                             # Cobra command layer (thin: parse → action → format)
 │   ├── root.go                      # Root command, global flags, initClient(), handleErr(), --tui launch
 │   ├── instance.go                  # instance add/remove/list/use/show/discover + verifyInstance()
-│   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot
-│   ├── container.go                 # ct list/start/stop/shutdown/reboot/info/clone/delete/snapshot
+│   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot/template/disk/tag
+│   ├── container.go                 # ct list/start/stop/shutdown/reboot/info/clone/delete/snapshot/template/disk/tag
 │   ├── backup.go                    # backup storages/list/create/delete/restore/info
 │   ├── node.go                      # node list/info
 │   ├── cluster.go                   # cluster status/resources/tasks
 │   ├── user.go                      # user list/create/delete/password/grant/revoke/token
 │   ├── access.go                    # acl list; role list
-│   └── output.go                    # watchTask(), formatBytes(), formatUptime(), formatCPUPercent()
+│   └── output.go                    # watchTask(), formatBytes(), formatUptime(), formatCPUPercent(), selectFromList(), normalizeDiskSize()
 ├── tui/                             # Bubble Tea interactive TUI (launched via pxve --tui)
 │   ├── tui.go                       # appModel router, screen enum, LaunchTUI() entry point
 │   ├── selector.go                  # Instance picker + inline add/remove/discover instance form
@@ -111,11 +111,15 @@ pxve/
 - `ResizeContainerDisk(ctx, c, ctid, nodeName, disk, size)` — uses a raw `c.Put()` to
   `/nodes/{node}/lxc/{ctid}/resize` instead of `ct.Resize()`, because go-proxmox sends
   `POST` but Proxmox requires `PUT`. `disk` e.g. `"rootfs"`, `"mp0"`; same `'+'` size format.
-- `MoveVMDisk(ctx, c, vmid, nodeName, disk, storage, delete, format)` — moves a VM disk
-  to a different storage. `delete=true` removes the source disk after the move. `format=0`
-  keeps the original format.
-- `MoveContainerVolume(ctx, c, ctid, nodeName, volume, storage, delete, format)` — same
+- `MoveVMDisk(ctx, c, vmid, nodeName, disk, storage, deleteAfter, bwlimit)` — moves a VM disk
+  to a different storage. `deleteAfter=true` removes the source disk after the move.
+  `bwlimit` in KiB/s (0 = unlimited). Supports live migration (moving disks on running VMs).
+- `MoveContainerVolume(ctx, c, ctid, nodeName, volume, storage, deleteAfter, bwlimit)` — same
   for CT volumes (rootfs or mount points).
+- `DetachVMDisk(ctx, c, vmid, nodeName, disk, deleteData)` — detaches a disk from a VM config.
+  When `deleteData=false`, the disk is moved to an `unusedN` slot (data preserved). When
+  `deleteData=true`, the disk data is permanently and irreversibly destroyed. Calls
+  `vm.UnlinkDisk(ctx, disk, deleteData)`.
 - **Tag actions** (`vm.go`, `container.go`, `cluster.go`): `VMTags(ctx, c, vmid, node)`,
   `AddVMTag(ctx, c, vmid, node, tag)`, `RemoveVMTag(ctx, c, vmid, node, tag)` — and
   matching `ContainerTags / AddContainerTag / RemoveContainerTag`. Proxmox stores tags as
