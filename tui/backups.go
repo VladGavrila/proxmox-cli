@@ -432,8 +432,8 @@ func (m backupsScreenModel) view() string {
 			"",
 			StyleError.Render("Error: " + m.err.Error()),
 			"",
-			StyleHelp.Render("[ctrl+r] retry"),
-			StyleHelp.Render("[Esc] back   [Q] quit"),
+			renderHelp("[ctrl+r] retry"),
+			renderHelp("[Esc] back   [Q] quit"),
 		}
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
@@ -460,7 +460,7 @@ func (m backupsScreenModel) view() string {
 	// Overlay modes.
 	lines = append(lines, m.viewOverlay()...)
 
-	lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
+	lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 }
@@ -492,7 +492,7 @@ func (m backupsScreenModel) viewOverlay() []string {
 		}
 		lines = append(lines, idLabel+m.restoreIDInput.View())
 		lines = append(lines, nameLabel+m.restoreNameInput.View())
-		lines = append(lines, StyleHelp.Render("[Enter] next/confirm  [Esc] cancel"))
+		lines = append(lines, renderHelp("[Enter] next/confirm  [Esc] cancel"))
 
 	case backupsScreenRestoreStorage:
 		if len(m.availableStorages) > 0 {
@@ -507,15 +507,15 @@ func (m backupsScreenModel) viewOverlay() []string {
 					fmt.Sprintf("%s%s (%s free, %s)", cursor, s.Name, s.Avail, s.Type),
 				))
 			}
-			lines = append(lines, StyleHelp.Render("[Enter] select  [Esc] cancel"))
+			lines = append(lines, renderHelp("[Enter] select  [Esc] cancel"))
 		}
 
 	default:
 		lines = append(lines, "")
 		if len(m.backups) > 0 {
-			lines = append(lines, StyleHelp.Render("[Alt+d] delete  [Alt+r] restore  |  [Tab] list  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[Alt+d] delete  [Alt+r] restore  |  [Tab] list  |  [ctrl+r] refresh"))
 		} else {
-			lines = append(lines, StyleHelp.Render("[Tab] list  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[Tab] list  |  [ctrl+r] refresh"))
 		}
 	}
 

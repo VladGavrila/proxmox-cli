@@ -318,8 +318,8 @@ func (m usersModel) view() string {
 			"",
 			StyleError.Render("Error: " + m.err.Error()),
 			"",
-			StyleHelp.Render("[ctrl+r] retry"),
-			StyleHelp.Render("[Esc] back   [Q] quit"),
+			renderHelp("[ctrl+r] retry"),
+			renderHelp("[Esc] back   [Q] quit"),
 		}
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
@@ -339,7 +339,7 @@ func (m usersModel) view() string {
 			}
 		}
 		lines = append(lines, "")
-		lines = append(lines, StyleHelp.Render("[Enter] next/save   [Esc] cancel"))
+		lines = append(lines, renderHelp("[Enter] next/save   [Esc] cancel"))
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
@@ -368,8 +368,8 @@ func (m usersModel) view() string {
 		} else {
 			lines = append(lines, "")
 		}
-		lines = append(lines, StyleHelp.Render("[a] add   [d] delete  |  [Tab] backups  |  [ctrl+r] refresh"))
-		lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
+		lines = append(lines, renderHelp("[a] add   [d] delete  |  [Tab] backups  |  [ctrl+r] refresh"))
+		lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 	}
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	proxmox "github.com/luthermonson/go-proxmox"
 )
@@ -121,6 +124,38 @@ func formatUptime(seconds uint64) string {
 // formatCPUPercent formats a CPU usage float as a percentage string.
 func formatCPUPercent(cpu float64) string {
 	return fmt.Sprintf("%.1f%%", cpu*100)
+}
+
+// selectFromList auto-selects when items has exactly one entry, or prompts the
+// user to pick from a numbered list when there are multiple. noun is the
+// human-readable name of what is being selected (e.g. "disk", "volume").
+// items maps identifier → description string shown to the user.
+func selectFromList(cmd *cobra.Command, items map[string]string, noun string) (string, error) {
+	keys := make([]string, 0, len(items))
+	for k := range items {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	switch len(keys) {
+	case 0:
+		return "", fmt.Errorf("no moveable %s found", noun)
+	case 1:
+		fmt.Fprintf(cmd.OutOrStdout(), "Auto-selected %s: %s\n", noun, keys[0])
+		return keys[0], nil
+	default:
+		fmt.Fprintf(cmd.OutOrStdout(), "Multiple %ss found:\n", noun)
+		for i, k := range keys {
+			fmt.Fprintf(cmd.OutOrStdout(), "  [%d] %s  %s\n", i+1, k, items[k])
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Select %s [1-%d]: ", noun, len(keys))
+		var idx int
+		fmt.Fscan(cmd.InOrStdin(), &idx)
+		if idx < 1 || idx > len(keys) {
+			return "", fmt.Errorf("invalid selection %d", idx)
+		}
+		return keys[idx-1], nil
+	}
 }
 
 // watchTask streams task log lines to w. Falls back to WaitFor if Watch

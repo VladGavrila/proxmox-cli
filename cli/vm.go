@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -16,6 +17,18 @@ import (
 
 	"github.com/chupakbra/proxmox-cli/internal/actions"
 )
+
+var tagNameRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+func validateTag(tag string) error {
+	if tag == "" {
+		return fmt.Errorf("tag must not be empty")
+	}
+	if !tagNameRegex.MatchString(tag) {
+		return fmt.Errorf("invalid tag %q: use only letters, digits, hyphens, underscores, and dots", tag)
+	}
+	return nil
+}
 
 func vmCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -31,6 +44,9 @@ func vmCmd() *cobra.Command {
 	cmd.AddCommand(vmCloneCmd())
 	cmd.AddCommand(vmDeleteCmd())
 	cmd.AddCommand(vmSnapshotCmd())
+	cmd.AddCommand(vmTemplateCmd())
+	cmd.AddCommand(vmDiskCmd())
+	cmd.AddCommand(vmTagCmd())
 	return cmd
 }
 
@@ -365,6 +381,392 @@ func vmCloneCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
 	cmd.Flags().IntVar(&newid, "newid", 0, "ID for the new VM (default: next available)")
+	return cmd
+}
+
+func vmTemplateCmd() *cobra.Command {
+	var (
+		nodeName string
+		force    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "template <vmid>",
+		Short: "Convert a VM to a template",
+		Long: `Convert a VM to a template. The VM must be stopped.
+
+This operation is irreversible — the VM becomes read-only and can only be cloned.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			if !force {
+				fmt.Fprintf(cmd.OutOrStdout(), "Convert VM %d to a template? This cannot be undone. [y/N]: ", vmid)
+				var response string
+				fmt.Fscan(cmd.InOrStdin(), &response)
+				if strings.ToLower(strings.TrimSpace(response)) != "y" {
+					fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+					return nil
+				}
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Converting to template...")
+			task, err := actions.ConvertVMToTemplate(ctx, proxmoxClient, vmid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Converting VM %d to template...\n", vmid)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "VM %d is now a template.\n", vmid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().BoolVar(&force, "force", false, "skip confirmation prompt")
+	return cmd
+}
+
+// vmDiskCmd groups disk sub-commands.
+func vmDiskCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "disk",
+		Short: "Disk operations",
+	}
+	cmd.AddCommand(vmDiskResizeCmd(), vmDiskMoveCmd(), vmDiskDetachCmd())
+	return cmd
+}
+
+func vmDiskResizeCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "resize <vmid> <disk> <size>",
+		Short: "Grow a VM disk",
+		Long: `Grow a VM disk by the specified size delta.
+
+disk is the disk identifier, e.g. scsi0, virtio0, ide0, sata0.
+size is a delta with a unit suffix, e.g. 10G, 512M. The '+' prefix is added automatically.`,
+		Args: cobra.ExactArgs(3),
+		Example: `  pxve vm disk resize 100 scsi0 +10G
+  pxve vm disk resize 100 virtio0 +512M`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			disk := args[1]
+			size, err := normalizeDiskSize(args[2])
+			if err != nil {
+				return err
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Resizing disk...")
+			task, err := actions.ResizeVMDisk(ctx, proxmoxClient, vmid, nodeName, disk, size)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Resizing disk %s on VM %d by %s...\n", disk, vmid, size)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Disk %s resized.\n", disk)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func vmDiskMoveCmd() *cobra.Command {
+	var (
+		nodeName    string
+		storage     string
+		deleteAfter bool
+		bwlimit     uint64
+	)
+	cmd := &cobra.Command{
+		Use:   "move <vmid> [disk] --storage <target-storage>",
+		Short: "Move a VM disk to a different storage",
+		Long: `Move a VM disk to a different storage pool.
+
+disk is the disk identifier, e.g. scsi0, virtio0. If omitted, the disk is
+auto-selected when the VM has only one moveable disk; otherwise a prompt is shown.
+The source disk is deleted after the move by default; use --delete=false to keep it.
+Moving a disk on a running VM is supported (live migration).`,
+		Args: cobra.RangeArgs(1, 2),
+		Example: `  pxve vm disk move 100 --storage local-zfs           # auto-select disk
+  pxve vm disk move 100 scsi0 --storage local-zfs
+  pxve vm disk move 100 virtio0 --storage ceph-pool --delete --bwlimit 102400`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			if storage == "" {
+				return fmt.Errorf("--storage is required")
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+
+			var disk string
+			if len(args) == 2 {
+				disk = args[1]
+			} else {
+				s := startSpinner("Loading VM info...")
+				vm, err := actions.FindVM(ctx, proxmoxClient, vmid, nodeName)
+				s.Stop()
+				if err != nil {
+					return handleErr(err)
+				}
+				filtered := make(map[string]string)
+				for k, v := range vm.VirtualMachineConfig.MergeDisks() {
+					if v == "" || strings.Contains(v, "media=cdrom") {
+						continue
+					}
+					// Skip disks already on the target storage.
+					if parts := strings.SplitN(v, ":", 2); len(parts) > 0 && parts[0] == storage {
+						continue
+					}
+					filtered[k] = v
+				}
+				disk, err = selectFromList(cmd, filtered, "disk")
+				if err != nil {
+					return err
+				}
+			}
+
+			s := startSpinner("Moving disk...")
+			task, err := actions.MoveVMDisk(ctx, proxmoxClient, vmid, nodeName, disk, storage, deleteAfter, bwlimit)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Moving disk %s on VM %d to %q...\n", disk, vmid, storage)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Disk %s moved to %q.\n", disk, storage)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().StringVar(&storage, "storage", "", "target storage name (required)")
+	cmd.Flags().BoolVar(&deleteAfter, "delete", true, "delete original disk after move (default true; use --delete=false to keep)")
+	cmd.Flags().Uint64Var(&bwlimit, "bwlimit", 0, "bandwidth limit in KiB/s (0 = unlimited)")
+	return cmd
+}
+
+func vmDiskDetachCmd() *cobra.Command {
+	var (
+		nodeName   string
+		deleteData bool
+		force      bool
+	)
+	cmd := &cobra.Command{
+		Use:   "detach <vmid> <disk>",
+		Short: "Detach a disk from a VM",
+		Long: `Detach a disk from the VM config.
+
+Without --delete: disk data is preserved and the disk moves to an "unusedN" slot.
+With --delete: disk data is permanently and irreversibly destroyed.
+
+A confirmation prompt is shown when --delete is set, unless --force is also given.`,
+		Args: cobra.ExactArgs(2),
+		Example: `  pxve vm disk detach 100 scsi1              # moves to unused (data safe)
+  pxve vm disk detach 100 scsi1 --delete     # prompts, then destroys data
+  pxve vm disk detach 100 scsi1 --delete --force  # no prompt`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			disk := args[1]
+			if deleteData && !force {
+				fmt.Fprintf(cmd.OutOrStdout(), "WARNING: This will permanently delete disk %s data on VM %d. Continue? [y/N]: ", disk, vmid)
+				var response string
+				fmt.Fscan(cmd.InOrStdin(), &response)
+				if strings.ToLower(strings.TrimSpace(response)) != "y" {
+					fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+					return nil
+				}
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Detaching disk...")
+			task, err := actions.DetachVMDisk(ctx, proxmoxClient, vmid, nodeName, disk, deleteData)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Detaching disk %s from VM %d...\n", disk, vmid)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			if deleteData {
+				fmt.Fprintf(cmd.OutOrStdout(), "Disk %s detached and data deleted.\n", disk)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Disk %s detached (data preserved as unused disk).\n", disk)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().BoolVar(&deleteData, "delete", false, "permanently delete disk data")
+	cmd.Flags().BoolVar(&force, "force", false, "skip confirmation prompt when --delete is set")
+	return cmd
+}
+
+// normalizeDiskSize ensures size has a leading '+' and a valid unit suffix (G/M/K/T).
+// The '+' is prepended automatically if omitted.
+func normalizeDiskSize(size string) (string, error) {
+	if !strings.HasPrefix(size, "+") {
+		size = "+" + size
+	}
+	if len(size) < 2 {
+		return "", fmt.Errorf("size %q is too short", size)
+	}
+	unit := strings.ToUpper(string(size[len(size)-1]))
+	switch unit {
+	case "G", "M", "K", "T":
+		return size, nil
+	default:
+		return "", fmt.Errorf("size %q has unknown unit %q (use G, M, K, or T)", size, unit)
+	}
+}
+
+// vmTagCmd groups tag sub-commands.
+func vmTagCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "tag",
+		Short: "Manage VM tags",
+	}
+	cmd.AddCommand(vmTagListCmd(), vmTagAddCmd(), vmTagRemoveCmd())
+	return cmd
+}
+
+func vmTagListCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "list <vmid>",
+		Short: "List tags on a VM",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Loading...")
+			tags, err := actions.VMTags(ctx, proxmoxClient, vmid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			if flagOutput == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				if tags == nil {
+					tags = []string{}
+				}
+				return enc.Encode(tags)
+			}
+			if len(tags) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "(no tags)")
+				return nil
+			}
+			for _, t := range tags {
+				fmt.Fprintln(cmd.OutOrStdout(), t)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func vmTagAddCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "add <vmid> <tag>",
+		Short: "Add a tag to a VM",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			tag := args[1]
+			if err := validateTag(tag); err != nil {
+				return err
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Connecting...")
+			task, err := actions.AddVMTag(ctx, proxmoxClient, vmid, nodeName, tag)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Tag %q added to VM %d.\n", tag, vmid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func vmTagRemoveCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "remove <vmid> <tag>",
+		Short: "Remove a tag from a VM",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			tag := args[1]
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Connecting...")
+			task, err := actions.RemoveVMTag(ctx, proxmoxClient, vmid, nodeName, tag)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Tag %q removed from VM %d.\n", tag, vmid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
 	return cmd
 }
 

@@ -502,7 +502,7 @@ func (m selectorModel) view() string {
 			}
 		}
 		lines = append(lines, "")
-		lines = append(lines, StyleHelp.Render("[Enter] next/save   [Esc] cancel"))
+		lines = append(lines, renderHelp("[Enter] next/save   [Esc] cancel"))
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
@@ -512,14 +512,14 @@ func (m selectorModel) view() string {
 		label := StyleWarning.Render("  Subnet:       ")
 		lines = append(lines, label+m.discoverInput.View())
 		lines = append(lines, "")
-		lines = append(lines, StyleHelp.Render("[Enter] scan (empty = local subnets)   [Esc] cancel"))
+		lines = append(lines, renderHelp("[Enter] scan (empty = local subnets)   [Esc] cancel"))
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
 	// Discovery scanning overlay.
 	if m.mode == selectorDiscovering {
 		lines := []string{title, "", StyleWarning.Render(m.spinner.View() + " Scanning network for Proxmox instances...")}
-		lines = append(lines, "", StyleHelp.Render("[Esc] cancel"))
+		lines = append(lines, "", renderHelp("[Esc] cancel"))
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
@@ -527,7 +527,7 @@ func (m selectorModel) view() string {
 	if m.mode == selectorDiscoverResult {
 		lines := []string{title, "", StyleTitle.Render("Discovered Instances"), ""}
 		lines = append(lines, m.discoverTable.View())
-		lines = append(lines, "", StyleHelp.Render("[Enter] add   [Esc] back"))
+		lines = append(lines, "", renderHelp("[Enter] add   [Esc] back"))
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
@@ -541,7 +541,7 @@ func (m selectorModel) view() string {
 		} else {
 			lines = append(lines, "")
 		}
-		lines = append(lines, StyleHelp.Render("[a] add   [d] discover   [Q] quit"))
+		lines = append(lines, renderHelp("[a] add   [d] discover   [Q] quit"))
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
@@ -577,8 +577,8 @@ func (m selectorModel) view() string {
 		lines = append(lines, "") // keep height stable
 	}
 
-	lines = append(lines, StyleHelp.Render("[Enter] connect  |  [a] add   [d] discover   [R] remove"))
-	lines = append(lines, StyleHelp.Render("[Q] quit"))
+	lines = append(lines, renderHelp("[Enter] connect  |  [a] add   [d] discover   [R] remove"))
+	lines = append(lines, renderHelp("[Q] quit"))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 }

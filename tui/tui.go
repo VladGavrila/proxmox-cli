@@ -82,6 +82,8 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		a.selector.width = msg.Width
 		a.selector.height = msg.Height
+		a.selector.table = a.selector.buildTable()
+		a.selector.discoverTable = a.selector.buildDiscoverTable()
 		a.list.width = msg.Width
 		a.list.height = msg.Height
 		a.users.width = msg.Width

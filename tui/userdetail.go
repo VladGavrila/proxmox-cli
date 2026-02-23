@@ -490,7 +490,7 @@ func (m userDetailModel) view() string {
 			"",
 			StyleError.Render("IMPORTANT: This value is shown only once. Save it now!"),
 			"",
-			StyleHelp.Render("[Enter] / [Esc] dismiss"),
+			renderHelp("[Enter] / [Esc] dismiss"),
 		}
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
@@ -521,8 +521,8 @@ func (m userDetailModel) view() string {
 
 	if m.loadErr != nil {
 		lines = append(lines, StyleError.Render("Error: "+m.loadErr.Error()))
-		lines = append(lines, StyleHelp.Render("[ctrl+r] retry"))
-		lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
+		lines = append(lines, renderHelp("[ctrl+r] retry"))
+		lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
@@ -542,7 +542,7 @@ func (m userDetailModel) view() string {
 		case userDetailInputToken:
 			lines = append(lines, "")
 			lines = append(lines, StyleWarning.Render("New token name: ")+m.tokenInput.View())
-			lines = append(lines, StyleHelp.Render("[Enter] create   [Esc] cancel"))
+			lines = append(lines, renderHelp("[Enter] create   [Esc] cancel"))
 		case userDetailConfirmDeleteToken:
 			cursor := m.tokensTable.Cursor()
 			name := ""
@@ -555,8 +555,8 @@ func (m userDetailModel) view() string {
 			))
 		default:
 			lines = append(lines, m.statusLine())
-			lines = append(lines, StyleHelp.Render("[t] new token   [d] delete  |  [Tab] ACLs  |  [ctrl+r] refresh"))
-			lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
+			lines = append(lines, renderHelp("[t] new token   [d] delete  |  [Tab] ACLs  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 		}
 	} else {
 		// ACLs tab.
@@ -594,7 +594,7 @@ func (m userDetailModel) view() string {
 					lines = append(lines, StyleDim.Render(label)+inp.View())
 				}
 			}
-			lines = append(lines, StyleHelp.Render("[Enter] next/save   [Esc] cancel"))
+			lines = append(lines, renderHelp("[Enter] next/save   [Esc] cancel"))
 		case userDetailConfirmRevoke:
 			cursor := m.aclsTable.Cursor()
 			var path, role string
@@ -608,8 +608,8 @@ func (m userDetailModel) view() string {
 			))
 		default:
 			lines = append(lines, m.statusLine())
-			lines = append(lines, StyleHelp.Render("[g] grant   [r] revoke  |  [Tab] Tokens  |  [ctrl+r] refresh"))
-			lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
+			lines = append(lines, renderHelp("[g] grant   [r] revoke  |  [Tab] Tokens  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 		}
 	}
 

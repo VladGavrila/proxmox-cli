@@ -28,7 +28,9 @@ pxve/
 │   ├── selector.go                  # Instance picker + inline add/remove/discover instance form
 │   ├── discover.go                  # tea.Cmd wrapper around internal/discovery for the TUI
 │   ├── list.go                      # VM + CT list table with auto-refresh, power/clone/delete
-│   ├── detail.go                    # VM/CT detail: info, power, clone, delete, snapshots, backups
+│   ├── detail.go                    # VM/CT detail: types, state machine, update()
+│   ├── detail_cmds.go               # All tea.Cmd closures for detail screen
+│   ├── detail_view.go               # Rendering — view(), tab views, overlays, formatUptime
 │   ├── users.go                     # Proxmox user list + inline create/delete
 │   ├── backups.go                   # Cluster-wide backup list + inline delete
 │   ├── userdetail.go                # User detail: tokens + ACLs, create/delete/grant/revoke
@@ -39,8 +41,8 @@ pxve/
 │   ├── errors/errors.go             # Handle() maps sentinel errors to friendly messages
 │   ├── discovery/discovery.go       # Network scan for Proxmox instances (shared by CLI + TUI)
 │   └── actions/                     # All Proxmox logic — shared by CLI and TUI
-│       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
-│       ├── container.go             # ListContainers, FindContainer, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots
+│       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots/ConvertToTemplate
+│       ├── container.go             # ListContainers, FindContainer, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots/ConvertToTemplate
 │       ├── backup.go               # ListBackupStorages, ListBackups, CreateBackup, DeleteBackup, RestoreBackup, BackupConfig, NextID
 │       ├── node.go                  # ListNodes, GetNode
 │       ├── cluster.go               # GetCluster, ClusterResources, ClusterTasks
@@ -99,6 +101,29 @@ pxve/
   does not expose this method on `VirtualMachine`.
 - `CloneVM` calls `c.Cluster().NextID()` to auto-assign the next available VMID when
   `newid == 0`.
+- `ConvertVMToTemplate(ctx, c, vmid, nodeName)` — calls `vm.ConvertToTemplate(ctx)`
+  and returns a `*proxmox.Task`. The VM must be stopped.
+- `ConvertContainerToTemplate(ctx, c, ctid, nodeName)` — calls `ct.Template(ctx)`
+  (returns `error`, no task). The container must be stopped.
+- `ResizeVMDisk(ctx, c, vmid, nodeName, disk, size)` — calls `vm.ResizeDisk(ctx, disk, size)`.
+  `disk` e.g. `"scsi0"`, `"virtio0"`; `size` must start with `'+'`, e.g. `"+10G"`. The CLI
+  and TUI prepend `'+'` automatically, so callers of the action must pass it explicitly.
+- `ResizeContainerDisk(ctx, c, ctid, nodeName, disk, size)` — uses a raw `c.Put()` to
+  `/nodes/{node}/lxc/{ctid}/resize` instead of `ct.Resize()`, because go-proxmox sends
+  `POST` but Proxmox requires `PUT`. `disk` e.g. `"rootfs"`, `"mp0"`; same `'+'` size format.
+- `MoveVMDisk(ctx, c, vmid, nodeName, disk, storage, delete, format)` — moves a VM disk
+  to a different storage. `delete=true` removes the source disk after the move. `format=0`
+  keeps the original format.
+- `MoveContainerVolume(ctx, c, ctid, nodeName, volume, storage, delete, format)` — same
+  for CT volumes (rootfs or mount points).
+- **Tag actions** (`vm.go`, `container.go`, `cluster.go`): `VMTags(ctx, c, vmid, node)`,
+  `AddVMTag(ctx, c, vmid, node, tag)`, `RemoveVMTag(ctx, c, vmid, node, tag)` — and
+  matching `ContainerTags / AddContainerTag / RemoveContainerTag`. Proxmox stores tags as
+  a semicolon-separated string (`"prod;web-server"`). The actions read/modify this string
+  via `vm.Config()` and a raw PUT to the config endpoint. `splitTagsStr(s)` is an unexported
+  helper that splits on `;` and filters empty strings. `AllInstanceTags(ctx, c)` (in
+  `cluster.go`) scans all cluster resources and returns a sorted, deduplicated list of every
+  tag in use across the instance — used by the TUI tag picker.
 - **Backup actions** (`backup.go`): `ListBackupStorages` filters storages by `backup`
   content type. `ListRestoreStorages` filters by `images` (qemu) or `rootdir` (lxc)
   content type — these are distinct because backup-capable storages (e.g. `local`)
@@ -226,10 +251,10 @@ per screen:
 | Screen           | Model             | File             | Purpose                                          |
 |------------------|-------------------|------------------|--------------------------------------------------|
 | `screenSelector` | `selectorModel`   | `selector.go`    | Pick / add / remove / discover Proxmox instances |
-| `screenList`     | `listModel`       | `list.go`        | Table of all VMs + CTs, power actions, clone, delete |
+| `screenList`     | `listModel`       | `list.go`        | Table of all VMs + CTs, power actions, clone, delete, template |
 | `screenUsers`    | `usersModel`      | `users.go`       | Table of Proxmox users + create / delete          |
 | `screenBackups`  | `backupsScreenModel` | `backups.go`  | Cluster-wide backup list + delete + restore        |
-| `screenDetail`   | `detailModel`     | `detail.go`      | VM/CT info, power, clone, delete, snapshots, backups |
+| `screenDetail`   | `detailModel`     | `detail.go` / `detail_cmds.go` / `detail_view.go` | VM/CT info (incl. primary disk storage), power, clone, delete, template, resize/move disks, tags, snapshots, backups |
 | `screenUserDetail` | `userDetailModel` | `userdetail.go` | User info, token CRUD, ACL grant/revoke           |
 
 ### Navigation flow
@@ -278,20 +303,29 @@ Selector ──Enter──▸ List ──Enter──▸ Detail──▸ Esc
   full IP, or CIDR), `R` opens the remove-instance confirmation, and Enter connects
   to the selected instance. Discovery results appear in a table; selecting one
   pre-populates the add form with the discovered URL.
-- **Key binding convention**: Resource actions (power, clone, delete) use plain
-  letter keys — non-destructive are lowercase (`s` start, `c` clone),
-  destructive are uppercase (`S` stop, `U` shutdown, `R` reboot, `D` delete).
-  Snapshot/backup actions require **Alt** (or **Option** on macOS):
-  `Alt+s` new snapshot, `Alt+d` delete, `Alt+r` rollback/restore,
-  `Alt+b` new backup. macOS Option key sends Unicode characters (`ß`, `∂`,
-  `®`, `∫`), so both `alt+<key>` and the Unicode variant are matched.
-- **List-level actions**: The list screen supports the same power actions,
-  clone, and delete-with-confirmation as the detail screen, operating on the
-  highlighted resource. Clone uses a `listCloneInput` mode with a 2-field
-  input form (VMID + name); delete uses a `listConfirmDelete` mode with
-  Enter/Esc confirmation. After any action, the list auto-refreshes via
-  `actionResultMsg{needRefresh: true}`. The `resourceDeletedMsg` is
-  handled by the router for the detail screen (navigates back to list).
+- **Key binding convention**: Resource actions use plain letter keys — non-destructive
+  lowercase (`s` start, `c` clone), destructive uppercase (`S` stop, `U` shutdown,
+  `R` reboot, `D` delete, `T` convert to template). Alt/Option+key for
+  snapshot/backup/disk/tag actions: `Alt+s` new snapshot, `Alt+d` delete,
+  `Alt+r` rollback/restore, `Alt+b` new backup, `Alt+z` resize disk, `Alt+m` move disk,
+  `Alt+t` tag manager.
+  `T`, `Alt+z`, and `Alt+m` are available on both the **list screen** and the **detail screen**.
+  `Alt+t` is available on the **detail screen** only (tag list is shown in the detail stats line).
+  macOS Option key sends Unicode (`ß`=s, `∂`=d, `®`=r, `∫`=b, `Ω`=z, `µ`=m, `†`=t, `ø`=o);
+  both `alt+<key>` and the Unicode variant are matched in every case statement.
+  Note: `Ω` (Option+z) ≠ `ø` (Option+o) — easy to confuse when adding new bindings.
+- **List-level actions**: The list screen supports power actions, clone,
+  delete-with-confirmation, convert-to-template, disk resize, and disk move — all
+  operating on the highlighted resource. Clone: `listCloneInput` mode (2-field VMID +
+  name form). Delete: `listConfirmDelete` mode (Enter/Esc). Template:
+  `listConfirmTemplate` mode. Disk resize: `listResizeDisk` mode (2-field Disk + Size
+  form; disk pre-filled from resource type — `scsi0` for VMs, `rootfs` for CTs; `+`
+  prepended to size automatically). Disk move: `listSelectMoveDisk` → `listSelectMoveStorage`
+  cursor-picker flow (mirrors the detail screen; skips the disk picker when only one disk
+  exists, skips the storage picker when only one target exists).
+  After any mutating action the list auto-refreshes via `actionResultMsg{needRefresh: true}`.
+  `resourceDeletedMsg` is handled by the router (navigates back to list) and is only
+  emitted by the detail screen's delete/template actions.
 - **Detail tab bar**: The detail screen has two tabs (Snapshots and Backups),
   toggled with Tab. Each tab has its own data, table, loading state, and
   key bindings. Tab-specific keys (`Alt+s`/`Alt+d`/`Alt+r` for snapshots,
@@ -319,6 +353,128 @@ Selector ──Enter──▸ List ──Enter──▸ Detail──▸ Esc
 - **Clone behaviour**: Both VM and CT clones use **full clone** mode
   (`Full: 1`) rather than linked clones, ensuring the clone is fully
   independent of the source.
+
+### Detail screen file layout (`tui/detail*.go`)
+
+The detail screen logic is split across three files in the same package:
+
+| File | Responsibility |
+|---|---|
+| `detail.go` | `detailMode` enum, all data/message types, `detailModel` struct, `newDetailModel`, `withRebuilt*`, `init`, `formatSnapTime`, the full `update()` state machine, `selectedSnapshot/BackupInfo` helpers |
+| `detail_cmds.go` | All `tea.Cmd` closures: load (snapshots, backups, storages, nextID, primary disk), power, delete, clone, template, resize/move disk, snapshot CRUD, backup CRUD, tag CRUD |
+| `detail_view.go` | `view()`, `renderTabBar()`, `viewSnapshotsTab()`, `viewBackupsTab()`, `viewOverlay()`, `formatUptime()` |
+
+**`diskLocation` / `primaryDiskLoadedMsg` / `loadPrimaryDiskCmd`**: On detail screen init,
+`loadPrimaryDiskCmd()` is batched alongside `loadSnapshotsCmd()` and `loadBackupsCmd()`.
+It calls `FindVM`/`FindContainer`, sorts the disk keys, and returns the storage prefix of
+the first non-cdrom disk (e.g. `local-lvm` from `local-lvm:vm-101-disk-0,size=32G`); for
+CTs it parses `RootFS`. Errors are silently swallowed — the stats line shows `…` until
+the value arrives, then the storage name. The field resets to `""` when the detail model
+is re-constructed (e.g. navigating to a different resource).
+
+When adding a new detail-screen feature: add the mode constant and message type to
+`detail.go`, the API call to `detail_cmds.go`, and the overlay rendering to `detail_view.go`.
+
+### Convert to Template
+
+`[T]` converts the selected VM or CT to a Proxmox template. Available on both the
+**list screen** and the **detail screen**. The action is irreversible (the resource
+becomes read-only; it can only be cloned).
+
+**List screen flow** (`listConfirmTemplate` mode):
+1. Press `T` → shows confirmation overlay (`listConfirmTemplate` mode).
+2. Press `Enter` → calls `listConvertToTemplateCmd()` → returns `actionResultMsg{needRefresh: true}`;
+   the resource stays in the list (shown as a template after refresh).
+3. If the resource is already a template (`r.Template == 1`), shows `"Already a template"` and does nothing.
+
+**Detail screen flow** (`detailConfirmTemplate` mode):
+1. Press `T` → sets `detailConfirmTemplate` mode (shows confirmation overlay).
+2. Press `Enter` → calls `convertToTemplateCmd()` → dispatches `resourceDeletedMsg`
+   on success (the resource disappears from Proxmox's VM list, so the router
+   navigates back to the list screen).
+3. If the resource is already a template (`r.Template == 1`), the key press shows
+   `"Already a template"` and does nothing.
+
+### Disk Resize
+
+`[Alt+z]` (`Ω` on macOS) grows a disk on the selected VM or CT. Available on both
+the **list screen** and the **detail screen**.
+
+**Flow** (identical on both screens — mode `listResizeDisk` / `detailResizeDisk`):
+1. Press `Alt+z` → disk field pre-filled (`scsi0` for VMs, `rootfs` for CTs); focus
+   jumps straight to the size field.
+2. Type the size delta (e.g. `10G`, `512M`) — the `+` prefix is added automatically.
+3. `Tab`/`Shift+Tab` to move between Disk and Size fields if the default disk name
+   needs to be changed.
+4. `Enter` on the size field → calls `listResizeDiskCmd` / `resizeDiskCmd` →
+   returns `actionResultMsg` (no navigation change; list auto-refreshes via
+   `needRefresh: true`).
+
+**Size normalisation**: both the CLI (`normalizeDiskSize`) and TUI silently prepend
+`+` if the user omits it, so `10G` and `+10G` are both accepted.
+
+**Library bug workaround**: `ResizeContainerDisk` uses a raw `c.Put()` call to
+`/nodes/{node}/lxc/{ctid}/resize` because go-proxmox v0.4.0 uses `POST` for
+`ct.Resize()`, but Proxmox requires `PUT`.
+
+### Disk Move
+
+`[Alt+m]` (`µ` on macOS) moves a disk or volume to a different storage on the selected
+VM or CT. Available on both the **list screen** and the **detail screen**.
+
+**Flow** (identical on both screens):
+1. Press `Alt+m` → fetches disk list via `loadDisksCmd` / `listLoadDisksCmd`
+   (calls `FindVM`/`FindContainer`, reads `MergeDisks()`/`MergeMps()`; CD-ROM media filtered out).
+2. If one disk: skip picker, go straight to storage selection.
+   If multiple disks: show `detailSelectMoveDisk` / `listSelectMoveDisk` cursor list → `Enter` to select.
+3. Fetch move-target storages via `loadMoveStoragesCmd` / `listLoadMoveStoragesCmd`
+   (reuses `ListRestoreStorages`; filters out the disk's current storage).
+4. If one storage: execute immediately.
+   If multiple: show `detailSelectMoveStorage` / `listSelectMoveStorage` cursor list → `Enter` to confirm.
+5. Calls `MoveVMDisk` / `MoveContainerVolume` with `delete=true` (source disk removed after move).
+   Returns `actionResultMsg` (no navigation change).
+
+**Storage filter**: the source storage (parsed from the disk spec before the `:`) is
+excluded from the target list so the user can't accidentally move a disk to where it
+already lives.
+
+### Tag Management
+
+`[Alt+t]` (`†` on macOS) opens a tag browser overlay on the **detail screen**.
+
+**Flow**:
+1. Press `Alt+t` → `detailTagManage` mode — cursor list of the resource's current tags.
+2. `↑`/`↓` (or `j`/`k`) to move the cursor; `d`/`backspace` removes the selected tag
+   (fires `removeTagCmd` immediately, no extra confirmation).
+3. `a` fetches all tags declared across the instance (`loadAllTagsCmd` →
+   `actions.AllInstanceTags`) while showing a spinner. Three outcomes:
+   - **Tags available**: switch to `detailTagSelect` — a picker showing every instance
+     tag not already applied to this resource, plus a "New tag..." sentinel at the bottom.
+   - **No tags anywhere** (or fetch error, or all instance tags already applied):
+     skip the picker and go directly to `detailTagAdd` (text input).
+4. In `detailTagSelect`: `↑`/`↓`/`j`/`k` to navigate; `Enter` on a tag adds it
+   immediately; `Enter` on "New tag..." opens `detailTagAdd`; `Esc` returns to
+   `detailTagManage`.
+5. In `detailTagAdd`: type a new tag name → `Enter` to add (fires `addTagCmd`) or
+   `Esc` to return to `detailTagManage`; invalid names (validated against
+   `tagInputRegex`) show an error and stay in add mode.
+6. `Esc` in `detailTagManage` closes the overlay (returns to `detailNormal`).
+
+**Instance tag discovery**: `AllInstanceTags(ctx, c)` in `internal/actions/cluster.go`
+calls `ClusterResources(ctx, c, "vm")`, splits every resource's semicolon-delimited
+`Tags` field, deduplicates, and returns a sorted list. The picker filters this list to
+exclude tags already applied to the current resource, so only actionable choices appear.
+
+**Tag validation**: `tagInputRegex = ^[a-zA-Z0-9._-]+$` — letters, digits, hyphens,
+underscores, and dots. Proxmox itself is more permissive, but this regex matches
+common conventions and prevents accidental semicolons (which would corrupt the stored string).
+
+**Tags display**: When `r.Tags != ""`, a `Tags: tag1, tag2` line is shown below the
+stats line in the detail screen header. The list screen shows a `TAGS` column (width 15)
+using `formatTagsCell()`: up to 2 tags joined by `, `, then `+N` for overflow.
+
+**CLI**: `pxve vm tag list/add/remove <vmid>` and `pxve ct tag list/add/remove <ctid>`
+call the same action layer functions.
 
 ### Shared styles (`tui/styles.go`)
 

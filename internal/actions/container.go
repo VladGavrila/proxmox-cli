@@ -132,6 +132,59 @@ func ShutdownContainer(ctx context.Context, c *proxmox.Client, ctid int, nodeNam
 	return ct.Shutdown(ctx, false, 0)
 }
 
+// ConvertContainerToTemplate converts a container to a template.
+func ConvertContainerToTemplate(ctx context.Context, c *proxmox.Client, ctid int, nodeName string) error {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return err
+	}
+	return ct.Template(ctx)
+}
+
+// ContainerTags returns the list of tags on a container.
+func ContainerTags(ctx context.Context, c *proxmox.Client, ctid int, nodeName string) ([]string, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return splitTagsStr(ct.Tags), nil
+}
+
+// AddContainerTag adds a tag to a container and returns the task.
+func AddContainerTag(ctx context.Context, c *proxmox.Client, ctid int, nodeName, tag string) (*proxmox.Task, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return ct.AddTag(ctx, tag)
+}
+
+// RemoveContainerTag removes a tag from a container and returns the task.
+func RemoveContainerTag(ctx context.Context, c *proxmox.Client, ctid int, nodeName, tag string) (*proxmox.Task, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return ct.RemoveTag(ctx, tag)
+}
+
+// ResizeContainerDisk grows a container disk by the given delta. disk is e.g.
+// "rootfs", "mp0"; size must start with '+', e.g. "+10G".
+// go-proxmox uses POST for ct.Resize but Proxmox requires PUT, so we call the
+// API directly (same workaround as DeleteVMSnapshot).
+func ResizeContainerDisk(ctx context.Context, c *proxmox.Client, ctid int, nodeName, disk, size string) (*proxmox.Task, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/nodes/%s/lxc/%d/resize", ct.Node, ctid)
+	var upid proxmox.UPID
+	if err := c.Put(ctx, path, map[string]interface{}{"disk": disk, "size": size}, &upid); err != nil {
+		return nil, err
+	}
+	return proxmox.NewTask(upid, c), nil
+}
+
 // DeleteContainer deletes a container and returns the resulting task.
 func DeleteContainer(ctx context.Context, c *proxmox.Client, ctid int, nodeName string) (*proxmox.Task, error) {
 	ct, err := FindContainer(ctx, c, ctid, nodeName)
@@ -139,6 +192,26 @@ func DeleteContainer(ctx context.Context, c *proxmox.Client, ctid int, nodeName 
 		return nil, err
 	}
 	return ct.Delete(ctx)
+}
+
+// MoveContainerVolume moves a container volume to a different storage.
+// If deleteAfter is true, the original volume is removed after the move.
+func MoveContainerVolume(ctx context.Context, c *proxmox.Client, ctid int, nodeName, disk, storage string, deleteAfter bool, bwlimit uint64) (*proxmox.Task, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	opts := &proxmox.VirtualMachineMoveDiskOptions{
+		Disk:    disk,
+		Storage: storage,
+	}
+	if deleteAfter {
+		opts.Delete = 1
+	}
+	if bwlimit > 0 {
+		opts.BWLimit = bwlimit
+	}
+	return ct.MoveVolume(ctx, opts)
 }
 
 // CloneContainer clones a container to a new ID. If newid is 0, the next available ID is used.

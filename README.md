@@ -5,7 +5,7 @@ containers, nodes, users, and access control.
 
 ## Features
 
-- **VMs & containers** — list, start, stop, reboot, shutdown, clone, delete, snapshots
+- **VMs & containers** — list, start, stop, reboot, shutdown, clone, delete, snapshots, convert to template, disk resize, disk move, tag management
 - **Backups** — list, create (vzdump), delete, restore, inspect embedded config, storage discovery
 - **Nodes & cluster** — status, resources, running tasks
 - **Users & tokens** — create, delete, password, API token management
@@ -64,8 +64,8 @@ infrastructure without memorizing CLI subcommands. It reads instance
 profiles from `~/.pxve.yaml` and lets you:
 
 - **Select an instance** — pick from configured instances, add, remove, or discover instances inline
-- **Browse VMs & containers** — sortable table with status, CPU, memory, and disk usage
-- **Power actions** — start, stop, shutdown, reboot, clone, and delete directly from the list or detail view
+- **Browse VMs & containers** — sortable table with status, CPU, memory, and disk usage; detail view shows primary disk storage in the stats line
+- **Power actions** — start, stop, shutdown, reboot, clone, delete, convert to template, resize disks, move disks between storages, and manage tags directly from the list or detail view
 - **Manage snapshots** — create, delete, and rollback snapshots from the detail view
 - **Manage backups** — create, delete, and restore backups with storage selection and VMID/name prompts
 - **Browse all backups** — cluster-wide backup view across all nodes and storages with delete and restore
@@ -77,7 +77,10 @@ VMs, Users, and Backups views, **Q** or **Ctrl+C** to quit.
 
 Key bindings use plain letters for resource actions (lowercase for safe
 actions, uppercase for destructive) and **Alt/Option+key** for
-snapshot/backup actions. See the on-screen hints for available shortcuts.
+snapshot, backup, disk, and tag actions (`Alt+z` to resize a disk,
+`Alt+m` to move a disk to a different storage, `Alt+t` to manage tags —
+picks from tags already in use across the instance, or lets you insert a
+new one). See the on-screen hints for all available shortcuts.
 
 ## Instance Management
 
@@ -124,24 +127,33 @@ Binaries are fully static (`CGO_ENABLED=0`) with no runtime dependencies.
 `vm` and `ct` (alias: `container`) support the same set of subcommands:
 
 ```
-pxve vm | ct  list                          [--node <node>]
-pxve vm | ct  start    <id>                 [--node <node>]
-pxve vm | ct  stop     <id>                 [--node <node>]
-pxve vm | ct  shutdown <id>                 [--node <node>]
-pxve vm | ct  reboot   <id>                 [--node <node>]
-pxve vm | ct  info     <id>                 [--node <node>]
-pxve vm | ct  clone    <id> <name>          [--node <node>] [--newid <id>]
-pxve vm | ct  delete   <id>                 [--node <node>]
-pxve vm | ct  snapshot list     <id>        [--node <node>]
-pxve vm | ct  snapshot create   <id> <name> [--node <node>]
-pxve vm | ct  snapshot rollback <id> <name> [--node <node>]
-pxve vm | ct  snapshot delete   <id> <name> [--node <node>]
+pxve vm | ct  list                              [--node <node>]
+pxve vm | ct  start    <id>                     [--node <node>]
+pxve vm | ct  stop     <id>                     [--node <node>]
+pxve vm | ct  shutdown <id>                     [--node <node>]
+pxve vm | ct  reboot   <id>                     [--node <node>]
+pxve vm | ct  info     <id>                     [--node <node>]
+pxve vm | ct  clone    <id> <name>              [--node <node>] [--newid <id>]
+pxve vm | ct  delete   <id>                     [--node <node>]
+pxve vm | ct  template <id>                     [--node <node>] [--force]
+pxve vm | ct  disk resize <id> <disk> <size>    [--node <node>]
+pxve vm | ct  tag list   <id>                   [--node <node>]
+pxve vm | ct  tag add    <id> <tag>             [--node <node>]
+pxve vm | ct  tag remove <id> <tag>             [--node <node>]
+pxve vm | ct  snapshot list     <id>            [--node <node>]
+pxve vm | ct  snapshot create   <id> <name>     [--node <node>]
+pxve vm | ct  snapshot rollback <id> <name>     [--node <node>]
+pxve vm | ct  snapshot delete   <id> <name>     [--node <node>]
 ```
 
 > **Note:** `vm shutdown` sends an ACPI signal (guest-initiated). `ct shutdown`
 > sends an orderly shutdown request to the container runtime. Both are graceful;
 > `stop` is always forceful. Clones are always **full clones** (independent of
-> the source).
+> the source). `template` is **irreversible** — the VM or CT becomes read-only
+> and can only be cloned afterwards. Use `--force` to skip the confirmation prompt.
+> `disk resize` grows a disk by a delta — specify the amount and unit (e.g. `10G`,
+> `512M`); the `+` prefix is added automatically if omitted.
+> `tag` names may contain letters, digits, hyphens, underscores, and dots.
 
 ### Backups
 

@@ -21,9 +21,13 @@ import (
 type listMode int
 
 const (
-	listNormal        listMode = iota
-	listConfirmDelete          // waiting for Enter/Esc to confirm resource delete
-	listCloneInput             // text inputs for clone VMID + name
+	listNormal            listMode = iota
+	listConfirmDelete              // waiting for Enter/Esc to confirm resource delete
+	listCloneInput                 // text inputs for clone VMID + name
+	listConfirmTemplate            // confirm convert-to-template
+	listResizeDisk                 // text inputs for disk resize (disk ID + size delta)
+	listSelectMoveDisk             // cursor picker: choose which disk to move
+	listSelectMoveStorage          // cursor picker: choose target storage for move
 )
 
 // resourcesFetchedMsg is sent when the async fetch of VMs and containers completes.
@@ -53,6 +57,19 @@ type listModel struct {
 	cloneNameInput textinput.Model
 	cloneField     int // 0 = VMID, 1 = name
 
+	// Disk resize input state
+	resizeDiskInput textinput.Model
+	resizeSizeInput textinput.Model
+	resizeDiskField int // 0 = disk ID, 1 = size delta
+
+	// Disk move state
+	availableDisks  map[string]string
+	diskMoveKeys    []string
+	diskMoveIdx     int
+	pendingMoveDisk string
+	moveStorages    []storageChoice
+	moveStorageIdx  int
+
 	width  int
 	height int
 }
@@ -71,23 +88,35 @@ func newListModel(c *proxmox.Client, instName string, w, h int) listModel {
 	cnameInput.Placeholder = "clone name"
 	cnameInput.CharLimit = 63
 
+	rdiskInput := textinput.New()
+	rdiskInput.Placeholder = "e.g. scsi0, rootfs"
+	rdiskInput.CharLimit = 20
+	rdiskInput.Width = 20
+
+	rsizeInput := textinput.New()
+	rsizeInput.Placeholder = "e.g. 10G"
+	rsizeInput.CharLimit = 10
+	rsizeInput.Width = 10
+
 	return listModel{
-		client:         c,
-		instName:       instName,
-		loading:        true,
-		spinner:        s,
-		fetchID:        time.Now().UnixNano(),
-		cloneIDInput:   cidInput,
-		cloneNameInput: cnameInput,
-		width:          w,
-		height:         h,
+		client:          c,
+		instName:        instName,
+		loading:         true,
+		spinner:         s,
+		fetchID:         time.Now().UnixNano(),
+		cloneIDInput:    cidInput,
+		cloneNameInput:  cnameInput,
+		resizeDiskInput: rdiskInput,
+		resizeSizeInput: rsizeInput,
+		width:           w,
+		height:          h,
 	}
 }
 
 // fixedColWidth is the total width of all columns except NAME.
-// VMID(6) + TYPE(4) + TMPL(5) + NODE(12) + STATUS(10) + CPU(7) + MEM(10) + DISK(10) = 64
-// Plus cell padding: 9 columns × 2 chars (1 left + 1 right per cell) = 18.
-const fixedColWidth = 64 + 18
+// VMID(6) + TYPE(4) + TMPL(5) + NODE(12) + STATUS(10) + CPU(7) + MEM(10) + DISK(10) + TAGS(15) = 79
+// Plus cell padding: 10 columns × 2 chars (1 left + 1 right per cell) = 20.
+const fixedColWidth = 79 + 20
 
 func (m listModel) nameColWidth() int {
 	w := m.width - fixedColWidth - 4 // 4 for outer padding
@@ -110,6 +139,7 @@ func (m listModel) withRebuiltTable() listModel {
 		{Title: "CPU", Width: 7},
 		{Title: "MEM", Width: 10},
 		{Title: "DISK", Width: 10},
+		{Title: "TAGS", Width: 15},
 	}
 
 	rows := make([]table.Row, len(m.resources))
@@ -132,6 +162,7 @@ func (m listModel) withRebuiltTable() listModel {
 			formatPercent(r.CPU),
 			formatBytes(r.Mem),
 			formatBytes(r.MaxDisk),
+			formatTagsCell(r.Tags),
 		}
 	}
 
@@ -218,6 +249,58 @@ func (m listModel) update(msg tea.Msg) (listModel, tea.Cmd) {
 		m.cloneNameInput.Blur()
 		m.mode = listCloneInput
 		return m, textinput.Blink
+
+	case diskListLoadedMsg:
+		m.actionBusy = false
+		if msg.err != nil {
+			m.statusMsg = "Error: " + msg.err.Error()
+			m.statusErr = true
+			return m, nil
+		}
+		if len(msg.disks) == 0 {
+			m.statusMsg = "No moveable disks found"
+			m.statusErr = true
+			return m, nil
+		}
+		m.availableDisks = msg.disks
+		keys := make([]string, 0, len(msg.disks))
+		for k := range msg.disks {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		m.diskMoveKeys = keys
+		if len(keys) == 1 {
+			m.pendingMoveDisk = keys[0]
+			m.actionBusy = true
+			m.statusMsg = "Loading storages..."
+			return m, tea.Batch(m.listLoadMoveStoragesCmd(), m.spinner.Tick)
+		}
+		m.diskMoveIdx = 0
+		m.mode = listSelectMoveDisk
+		return m, nil
+
+	case moveStoragesLoadedMsg:
+		m.actionBusy = false
+		if msg.err != nil {
+			m.statusMsg = "Error: " + msg.err.Error()
+			m.statusErr = true
+			return m, nil
+		}
+		if len(msg.storages) == 0 {
+			m.statusMsg = "No target storages found"
+			m.statusErr = true
+			return m, nil
+		}
+		m.moveStorages = msg.storages
+		if len(msg.storages) == 1 {
+			m.mode = listNormal
+			m.actionBusy = true
+			m.statusMsg = "Moving disk..."
+			return m, tea.Batch(m.listMoveDiskCmd(m.pendingMoveDisk, msg.storages[0].Name), m.spinner.Tick)
+		}
+		m.moveStorageIdx = 0
+		m.mode = listSelectMoveStorage
+		return m, nil
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -335,6 +418,156 @@ func (m listModel) update(msg tea.Msg) (listModel, tea.Cmd) {
 			return m, nil
 		}
 
+		// Confirm template mode.
+		if m.mode == listConfirmTemplate {
+			switch msg.String() {
+			case "enter":
+				r := m.selectedResource()
+				m.mode = listNormal
+				if r == nil {
+					return m, nil
+				}
+				typeStr := "VM"
+				if r.Type == "lxc" {
+					typeStr = "CT"
+				}
+				m.actionBusy = true
+				m.statusMsg = fmt.Sprintf("Converting %s %d to template...", typeStr, r.VMID)
+				m.statusErr = false
+				return m, tea.Batch(m.listConvertToTemplateCmd(), m.spinner.Tick)
+			case "esc":
+				m.mode = listNormal
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// Disk resize input mode.
+		if m.mode == listResizeDisk {
+			switch msg.String() {
+			case "esc":
+				m.mode = listNormal
+				m.resizeDiskInput.Reset()
+				m.resizeSizeInput.Reset()
+				m.resizeDiskInput.Blur()
+				m.resizeSizeInput.Blur()
+				m.statusMsg = ""
+				m.statusErr = false
+				return m, nil
+			case "tab", "down":
+				if m.resizeDiskField == 0 {
+					m.resizeDiskField = 1
+					m.resizeDiskInput.Blur()
+					m.resizeSizeInput.Focus()
+					return m, textinput.Blink
+				}
+				m.resizeDiskField = 0
+				m.resizeSizeInput.Blur()
+				m.resizeDiskInput.Focus()
+				return m, textinput.Blink
+			case "shift+tab", "up":
+				if m.resizeDiskField == 1 {
+					m.resizeDiskField = 0
+					m.resizeSizeInput.Blur()
+					m.resizeDiskInput.Focus()
+					return m, textinput.Blink
+				}
+				m.resizeDiskField = 1
+				m.resizeDiskInput.Blur()
+				m.resizeSizeInput.Focus()
+				return m, textinput.Blink
+			case "enter":
+				if m.resizeDiskField == 0 {
+					if strings.TrimSpace(m.resizeDiskInput.Value()) == "" {
+						return m, nil
+					}
+					m.resizeDiskField = 1
+					m.resizeDiskInput.Blur()
+					m.resizeSizeInput.Focus()
+					return m, textinput.Blink
+				}
+				disk := strings.TrimSpace(m.resizeDiskInput.Value())
+				size := strings.TrimSpace(m.resizeSizeInput.Value())
+				m.resizeDiskInput.Blur()
+				m.resizeSizeInput.Blur()
+				if disk == "" || size == "" {
+					m.mode = listNormal
+					return m, nil
+				}
+				if !strings.HasPrefix(size, "+") {
+					size = "+" + size
+				}
+				r := m.selectedResource()
+				m.mode = listNormal
+				if r == nil {
+					return m, nil
+				}
+				typeStr := "VM"
+				if r.Type == "lxc" {
+					typeStr = "CT"
+				}
+				m.actionBusy = true
+				m.statusMsg = fmt.Sprintf("Resizing %s %d disk %s by %s...", typeStr, r.VMID, disk, size)
+				m.statusErr = false
+				return m, tea.Batch(m.listResizeDiskCmd(disk, size), m.spinner.Tick)
+			default:
+				var cmd tea.Cmd
+				if m.resizeDiskField == 0 {
+					m.resizeDiskInput, cmd = m.resizeDiskInput.Update(msg)
+				} else {
+					m.resizeSizeInput, cmd = m.resizeSizeInput.Update(msg)
+				}
+				return m, cmd
+			}
+		}
+
+		// Disk move: pick which disk.
+		if m.mode == listSelectMoveDisk {
+			switch msg.String() {
+			case "up", "k":
+				if m.diskMoveIdx > 0 {
+					m.diskMoveIdx--
+				}
+			case "down", "j":
+				if m.diskMoveIdx < len(m.diskMoveKeys)-1 {
+					m.diskMoveIdx++
+				}
+			case "enter":
+				m.pendingMoveDisk = m.diskMoveKeys[m.diskMoveIdx]
+				m.mode = listNormal
+				m.actionBusy = true
+				m.statusMsg = "Loading storages..."
+				return m, tea.Batch(m.listLoadMoveStoragesCmd(), m.spinner.Tick)
+			case "esc":
+				m.mode = listNormal
+			}
+			return m, nil
+		}
+
+		// Disk move: pick target storage.
+		if m.mode == listSelectMoveStorage {
+			switch msg.String() {
+			case "up", "k":
+				if m.moveStorageIdx > 0 {
+					m.moveStorageIdx--
+				}
+			case "down", "j":
+				if m.moveStorageIdx < len(m.moveStorages)-1 {
+					m.moveStorageIdx++
+				}
+			case "enter":
+				storageName := m.moveStorages[m.moveStorageIdx].Name
+				m.mode = listNormal
+				m.actionBusy = true
+				m.statusMsg = fmt.Sprintf("Moving disk %s...", m.pendingMoveDisk)
+				return m, tea.Batch(m.listMoveDiskCmd(m.pendingMoveDisk, storageName), m.spinner.Tick)
+			case "esc":
+				m.mode = listNormal
+				m.pendingMoveDisk = ""
+			}
+			return m, nil
+		}
+
 		// Normal mode: ignore keys during an in-flight action.
 		if m.actionBusy {
 			return m, nil
@@ -395,6 +628,42 @@ func (m listModel) update(msg tea.Msg) (listModel, tea.Cmd) {
 			}
 			m.mode = listConfirmDelete
 			return m, nil
+		case "T":
+			r := m.selectedResource()
+			if r == nil {
+				return m, nil
+			}
+			if r.Template == 1 {
+				m.statusMsg = "Already a template"
+				m.statusErr = true
+				return m, nil
+			}
+			m.mode = listConfirmTemplate
+			return m, nil
+		case "alt+z", "Ω":
+			r := m.selectedResource()
+			if r == nil {
+				return m, nil
+			}
+			defaultDisk := "scsi0"
+			if r.Type == "lxc" {
+				defaultDisk = "rootfs"
+			}
+			m.resizeDiskInput.SetValue(defaultDisk)
+			m.resizeSizeInput.Reset()
+			m.resizeDiskField = 1
+			m.resizeDiskInput.Blur()
+			m.resizeSizeInput.Focus()
+			m.mode = listResizeDisk
+			return m, textinput.Blink
+		case "alt+m", "µ":
+			if m.selectedResource() == nil {
+				return m, nil
+			}
+			m.actionBusy = true
+			m.statusMsg = "Loading disk info..."
+			m.statusErr = false
+			return m, tea.Batch(m.listLoadDisksCmd(), m.spinner.Tick)
 		case "ctrl+r":
 			m.loading = true
 			m.err = nil
@@ -429,8 +698,8 @@ func (m listModel) view() string {
 			"",
 			StyleError.Render("Error: " + m.err.Error()),
 			"",
-			StyleHelp.Render("[ctrl+r] retry"),
-			StyleHelp.Render("[Esc] back   [Q] quit"),
+			renderHelp("[ctrl+r] retry"),
+			renderHelp("[Esc] back   [Q] quit"),
 		}
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
@@ -484,14 +753,71 @@ func (m listModel) view() string {
 			}
 			lines = append(lines, idLabel+m.cloneIDInput.View())
 			lines = append(lines, nameLabel+m.cloneNameInput.View())
-			lines = append(lines, StyleHelp.Render("[Tab] switch field  [Enter] confirm  [Esc] cancel"))
+			lines = append(lines, renderHelp("[Tab] switch field  [Enter] confirm  [Esc] cancel"))
 		}
+	case listConfirmTemplate:
+		r := m.selectedResource()
+		if r != nil {
+			typeStr := "VM"
+			if r.Type == "lxc" {
+				typeStr = "CT"
+			}
+			lines = append(lines, StyleWarning.Render(
+				fmt.Sprintf("Convert %s %d (%s) to a template? This cannot be undone. [Enter] confirm   [Esc] cancel",
+					typeStr, r.VMID, r.Name),
+			))
+		}
+	case listResizeDisk:
+		r := m.selectedResource()
+		if r != nil {
+			typeStr := "VM"
+			if r.Type == "lxc" {
+				typeStr = "CT"
+			}
+			lines = append(lines, StyleWarning.Render(fmt.Sprintf("Resize disk on %s %d (%s)", typeStr, r.VMID, r.Name)))
+			diskLabel := StyleDim.Render("  Disk: ")
+			sizeLabel := StyleDim.Render("  Size: ")
+			if m.resizeDiskField == 0 {
+				diskLabel = StyleWarning.Render("> Disk: ")
+			} else {
+				sizeLabel = StyleWarning.Render("> Size: ")
+			}
+			lines = append(lines, diskLabel+m.resizeDiskInput.View())
+			lines = append(lines, sizeLabel+m.resizeSizeInput.View())
+			lines = append(lines, renderHelp("[Tab] switch field  [Enter] confirm  [Esc] cancel"))
+		}
+	case listSelectMoveDisk:
+		r := m.selectedResource()
+		diskLabel := "disk"
+		if r != nil && r.Type == "lxc" {
+			diskLabel = "volume"
+		}
+		lines = append(lines, StyleWarning.Render("Select "+diskLabel+" to move:"))
+		for i, k := range m.diskMoveKeys {
+			cursor := "  "
+			if i == m.diskMoveIdx {
+				cursor = "> "
+			}
+			lines = append(lines, StyleWarning.Render(fmt.Sprintf("%s%s  %s", cursor, k, m.availableDisks[k])))
+		}
+		lines = append(lines, renderHelp("[↑/↓] navigate   [Enter] select   [Esc] cancel"))
+	case listSelectMoveStorage:
+		lines = append(lines, StyleWarning.Render(fmt.Sprintf("Select target storage for %s:", m.pendingMoveDisk)))
+		for i, s := range m.moveStorages {
+			cursor := "  "
+			if i == m.moveStorageIdx {
+				cursor = "> "
+			}
+			lines = append(lines, StyleWarning.Render(fmt.Sprintf("%s%s (%s free, %s)", cursor, s.Name, s.Avail, s.Type)))
+		}
+		lines = append(lines, renderHelp("[↑/↓] navigate   [Enter] select   [Esc] cancel"))
 	default:
-		lines = append(lines, StyleHelp.Render("[s] start  [S] stop  [U] shutdown  [R] reboot  [c] clone  [D] delete"))
+		lines = append(lines, renderHelp("[s] start  [S] stop  [U] shutdown  [R] reboot  [c] clone  [D] delete  [T] template"))
+		lines = append(lines, renderHelp("[Alt+z] resize disk  [Alt+m] move disk"))
 	}
 
-	lines = append(lines, StyleHelp.Render("[Tab] users / backups  |  [ctrl+r] refresh"))
-	lines = append(lines, StyleHelp.Render("[Esc] back   [Q] quit"))
+	lines = append(lines, renderHelp("[Tab] users / backups  |  [ctrl+r] refresh"))
+	lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 }
 
@@ -628,6 +954,172 @@ func (m listModel) listCloneResourceCmd(newid int, name string) tea.Cmd {
 	}
 }
 
+func (m listModel) listResizeDiskCmd(disk, size string) tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	vmid := int(r.VMID)
+	rtype := r.Type
+	node := r.Node
+	return func() tea.Msg {
+		ctx := context.Background()
+		var task *proxmox.Task
+		var err error
+		if rtype == "qemu" {
+			task, err = actions.ResizeVMDisk(ctx, c, vmid, node, disk, size)
+		} else {
+			task, err = actions.ResizeContainerDisk(ctx, c, vmid, node, disk, size)
+		}
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if task != nil {
+			if werr := task.WaitFor(ctx, 300); werr != nil {
+				return actionResultMsg{err: werr}
+			}
+		}
+		return actionResultMsg{message: fmt.Sprintf("Disk %s resized by %s", disk, size)}
+	}
+}
+
+func (m listModel) listConvertToTemplateCmd() tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	vmid := int(r.VMID)
+	rtype := r.Type
+	node := r.Node
+	return func() tea.Msg {
+		ctx := context.Background()
+		typeStr := "VM"
+		if rtype == "lxc" {
+			typeStr = "CT"
+			err := actions.ConvertContainerToTemplate(ctx, c, vmid, node)
+			if err != nil {
+				return actionResultMsg{err: err}
+			}
+			return actionResultMsg{message: fmt.Sprintf("%s %d converted to template", typeStr, vmid), needRefresh: true}
+		}
+		task, err := actions.ConvertVMToTemplate(ctx, c, vmid, node)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if task != nil {
+			if werr := task.WaitFor(ctx, 120); werr != nil {
+				return actionResultMsg{err: werr}
+			}
+		}
+		return actionResultMsg{message: fmt.Sprintf("%s %d converted to template", typeStr, vmid), needRefresh: true}
+	}
+}
+
+func (m listModel) listLoadDisksCmd() tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	vmid := int(r.VMID)
+	rtype := r.Type
+	node := r.Node
+	return func() tea.Msg {
+		ctx := context.Background()
+		disks := make(map[string]string)
+		if rtype == "qemu" {
+			vm, err := actions.FindVM(ctx, c, vmid, node)
+			if err != nil {
+				return diskListLoadedMsg{err: err}
+			}
+			for k, v := range vm.VirtualMachineConfig.MergeDisks() {
+				if v != "" && !strings.Contains(v, "media=cdrom") {
+					disks[k] = v
+				}
+			}
+		} else {
+			ct, err := actions.FindContainer(ctx, c, vmid, node)
+			if err != nil {
+				return diskListLoadedMsg{err: err}
+			}
+			if ct.ContainerConfig.RootFS != "" {
+				disks["rootfs"] = ct.ContainerConfig.RootFS
+			}
+			for k, v := range ct.ContainerConfig.MergeMps() {
+				disks[k] = v
+			}
+		}
+		return diskListLoadedMsg{disks: disks}
+	}
+}
+
+func (m listModel) listLoadMoveStoragesCmd() tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	node := r.Node
+	rtype := r.Type
+	currentStorage := ""
+	if spec, ok := m.availableDisks[m.pendingMoveDisk]; ok {
+		if idx := strings.Index(spec, ":"); idx >= 0 {
+			currentStorage = spec[:idx]
+		}
+	}
+	return func() tea.Msg {
+		ctx := context.Background()
+		storages, err := actions.ListRestoreStorages(ctx, c, node, rtype)
+		if err != nil {
+			return moveStoragesLoadedMsg{err: err}
+		}
+		var choices []storageChoice
+		for _, s := range storages {
+			if s.Name == currentStorage {
+				continue
+			}
+			choices = append(choices, storageChoice{
+				Name:  s.Name,
+				Avail: formatBytes(s.Avail),
+				Type:  s.Type,
+			})
+		}
+		return moveStoragesLoadedMsg{storages: choices}
+	}
+}
+
+func (m listModel) listMoveDiskCmd(disk, storage string) tea.Cmd {
+	c := m.client
+	r := m.selectedResource()
+	if r == nil {
+		return nil
+	}
+	vmid := int(r.VMID)
+	rtype := r.Type
+	node := r.Node
+	return func() tea.Msg {
+		ctx := context.Background()
+		var task *proxmox.Task
+		var err error
+		if rtype == "qemu" {
+			task, err = actions.MoveVMDisk(ctx, c, vmid, node, disk, storage, true, 0)
+		} else {
+			task, err = actions.MoveContainerVolume(ctx, c, vmid, node, disk, storage, true, 0)
+		}
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if task != nil {
+			if werr := task.WaitFor(ctx, 600); werr != nil {
+				return actionResultMsg{err: werr}
+			}
+		}
+		return actionResultMsg{message: fmt.Sprintf("Disk %s moved to %s", disk, storage)}
+	}
+}
+
 // fetchAllResources fetches all VMs and containers in one API call and sorts by VMID.
 // fetchID is echoed back in the message so stale responses can be discarded.
 func fetchAllResources(c *proxmox.Client, fetchID int64) tea.Cmd {
@@ -644,6 +1136,33 @@ func fetchAllResources(c *proxmox.Client, fetchID int64) tea.Cmd {
 		sort.Slice(all, func(i, j int) bool { return all[i].VMID < all[j].VMID })
 		return resourcesFetchedMsg{resources: all, fetchID: fetchID}
 	}
+}
+
+// parseTags splits a Proxmox semicolon-separated tags string into a slice.
+func parseTags(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, t := range strings.Split(s, ";") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// formatTagsCell renders tags for the list table: up to 2 joined with commas,
+// with "+N" appended when there are more.
+func formatTagsCell(s string) string {
+	tags := parseTags(s)
+	if len(tags) == 0 {
+		return ""
+	}
+	if len(tags) <= 2 {
+		return strings.Join(tags, ",")
+	}
+	return strings.Join(tags[:2], ",") + fmt.Sprintf("+%d", len(tags)-2)
 }
 
 // formatRefreshTime formats a time as an HH:MM:SS timestamp.

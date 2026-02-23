@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	proxmox "github.com/luthermonson/go-proxmox"
 )
@@ -153,6 +154,98 @@ func CloneVM(ctx context.Context, c *proxmox.Client, vmid, newid int, nodeName, 
 		Full:  1,
 	})
 	return clonedID, task, err
+}
+
+// ConvertVMToTemplate converts a VM to a template.
+func ConvertVMToTemplate(ctx context.Context, c *proxmox.Client, vmid int, nodeName string) (*proxmox.Task, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.ConvertToTemplate(ctx)
+}
+
+// splitTagsStr splits a semicolon-separated Proxmox tags string into a slice,
+// filtering empty entries. Shared by VM and container tag functions.
+func splitTagsStr(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, t := range strings.Split(s, ";") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// VMTags returns the list of tags on a VM.
+func VMTags(ctx context.Context, c *proxmox.Client, vmid int, nodeName string) ([]string, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return splitTagsStr(vm.Tags), nil
+}
+
+// AddVMTag adds a tag to a VM and returns the task.
+func AddVMTag(ctx context.Context, c *proxmox.Client, vmid int, nodeName, tag string) (*proxmox.Task, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.AddTag(ctx, tag)
+}
+
+// RemoveVMTag removes a tag from a VM and returns the task.
+func RemoveVMTag(ctx context.Context, c *proxmox.Client, vmid int, nodeName, tag string) (*proxmox.Task, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.RemoveTag(ctx, tag)
+}
+
+// ResizeVMDisk grows a VM disk by the given delta. disk is e.g. "scsi0",
+// "virtio0"; size must start with '+', e.g. "+10G".
+func ResizeVMDisk(ctx context.Context, c *proxmox.Client, vmid int, nodeName, disk, size string) (*proxmox.Task, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.ResizeDisk(ctx, disk, size)
+}
+
+// MoveVMDisk moves a VM disk to a different storage.
+// If deleteAfter is true, the original disk is removed after the move.
+func MoveVMDisk(ctx context.Context, c *proxmox.Client, vmid int, nodeName, disk, storage string, deleteAfter bool, bwlimit uint64) (*proxmox.Task, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	opts := &proxmox.VirtualMachineMoveDiskOptions{
+		Disk:    disk,
+		Storage: storage,
+	}
+	if deleteAfter {
+		opts.Delete = 1
+	}
+	if bwlimit > 0 {
+		opts.BWLimit = bwlimit
+	}
+	return vm.MoveDisk(ctx, disk, opts)
+}
+
+// DetachVMDisk removes a disk from the VM config.
+// If deleteData is true, data is permanently deleted.
+// If false, the disk moves to "unusedN" entries (data preserved).
+func DetachVMDisk(ctx context.Context, c *proxmox.Client, vmid int, nodeName, disk string, deleteData bool) (*proxmox.Task, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.UnlinkDisk(ctx, disk, deleteData)
 }
 
 // DeleteVMSnapshot deletes a VM snapshot. The go-proxmox library does not expose

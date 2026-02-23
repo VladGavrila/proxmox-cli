@@ -31,6 +31,9 @@ func containerCmd() *cobra.Command {
 	cmd.AddCommand(ctCloneCmd())
 	cmd.AddCommand(ctDeleteCmd())
 	cmd.AddCommand(ctSnapshotCmd())
+	cmd.AddCommand(ctTemplateCmd())
+	cmd.AddCommand(ctDiskCmd())
+	cmd.AddCommand(ctTagCmd())
 	return cmd
 }
 
@@ -358,6 +361,310 @@ func ctCloneCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
 	cmd.Flags().IntVar(&newid, "newid", 0, "ID for the new container (default: next available)")
+	return cmd
+}
+
+func ctTemplateCmd() *cobra.Command {
+	var (
+		nodeName string
+		force    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "template <ctid>",
+		Short: "Convert a container to a template",
+		Long: `Convert a container to a template. The container must be stopped.
+
+This operation is irreversible — the container becomes read-only and can only be cloned.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			if !force {
+				fmt.Fprintf(cmd.OutOrStdout(), "Convert container %d to a template? This cannot be undone. [y/N]: ", ctid)
+				var response string
+				fmt.Fscan(cmd.InOrStdin(), &response)
+				if strings.ToLower(strings.TrimSpace(response)) != "y" {
+					fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+					return nil
+				}
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Converting to template...")
+			err = actions.ConvertContainerToTemplate(ctx, proxmoxClient, ctid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Container %d is now a template.\n", ctid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().BoolVar(&force, "force", false, "skip confirmation prompt")
+	return cmd
+}
+
+// ctDiskCmd groups disk sub-commands.
+func ctDiskCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "disk",
+		Short: "Disk operations",
+	}
+	cmd.AddCommand(ctDiskResizeCmd(), ctDiskMoveCmd())
+	return cmd
+}
+
+func ctDiskResizeCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "resize <ctid> <disk> <size>",
+		Short: "Grow a container disk",
+		Long: `Grow a container disk by the specified size delta.
+
+disk is the disk identifier, e.g. rootfs, mp0, mp1.
+size is a delta with a unit suffix, e.g. 10G, 512M. The '+' prefix is added automatically.`,
+		Args: cobra.ExactArgs(3),
+		Example: `  pxve ct disk resize 101 rootfs +10G
+  pxve ct disk resize 101 mp0 +5G`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			disk := args[1]
+			size, err := normalizeDiskSize(args[2])
+			if err != nil {
+				return err
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Resizing disk...")
+			task, err := actions.ResizeContainerDisk(ctx, proxmoxClient, ctid, nodeName, disk, size)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Resizing disk %s on container %d by %s...\n", disk, ctid, size)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Disk %s resized.\n", disk)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func ctDiskMoveCmd() *cobra.Command {
+	var (
+		nodeName    string
+		storage     string
+		deleteAfter bool
+		bwlimit     uint64
+	)
+	cmd := &cobra.Command{
+		Use:   "move <ctid> [disk] --storage <target-storage>",
+		Short: "Move a container volume to a different storage",
+		Long: `Move a container volume to a different storage pool.
+
+disk is the volume identifier, e.g. rootfs, mp0, mp1. If omitted, the volume
+is auto-selected when the container has only one moveable volume; otherwise a
+prompt is shown.
+The source volume is deleted after the move by default; use --delete=false to keep it.`,
+		Args: cobra.RangeArgs(1, 2),
+		Example: `  pxve ct disk move 101 --storage local-zfs             # auto-select volume
+  pxve ct disk move 101 rootfs --storage local-zfs
+  pxve ct disk move 101 mp0 --storage ceph-pool --delete`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			if storage == "" {
+				return fmt.Errorf("--storage is required")
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+
+			var disk string
+			if len(args) == 2 {
+				disk = args[1]
+			} else {
+				s := startSpinner("Loading container info...")
+				ct, err := actions.FindContainer(ctx, proxmoxClient, ctid, nodeName)
+				s.Stop()
+				if err != nil {
+					return handleErr(err)
+				}
+				vols := make(map[string]string)
+				if ct.ContainerConfig.RootFS != "" {
+					// Skip rootfs if it's already on the target storage.
+					if parts := strings.SplitN(ct.ContainerConfig.RootFS, ":", 2); len(parts) == 0 || parts[0] != storage {
+						vols["rootfs"] = ct.ContainerConfig.RootFS
+					}
+				}
+				for k, v := range ct.ContainerConfig.MergeMps() {
+					if parts := strings.SplitN(v, ":", 2); len(parts) > 0 && parts[0] == storage {
+						continue
+					}
+					vols[k] = v
+				}
+				disk, err = selectFromList(cmd, vols, "volume")
+				if err != nil {
+					return err
+				}
+			}
+
+			s := startSpinner("Moving volume...")
+			task, err := actions.MoveContainerVolume(ctx, proxmoxClient, ctid, nodeName, disk, storage, deleteAfter, bwlimit)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Moving volume %s on container %d to %q...\n", disk, ctid, storage)
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Volume %s moved to %q.\n", disk, storage)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().StringVar(&storage, "storage", "", "target storage name (required)")
+	cmd.Flags().BoolVar(&deleteAfter, "delete", true, "delete original volume after move (default true; use --delete=false to keep)")
+	cmd.Flags().Uint64Var(&bwlimit, "bwlimit", 0, "bandwidth limit in KiB/s (0 = unlimited)")
+	return cmd
+}
+
+// ctTagCmd groups tag sub-commands.
+func ctTagCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "tag",
+		Short: "Manage container tags",
+	}
+	cmd.AddCommand(ctTagListCmd(), ctTagAddCmd(), ctTagRemoveCmd())
+	return cmd
+}
+
+func ctTagListCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "list <ctid>",
+		Short: "List tags on a container",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Loading...")
+			tags, err := actions.ContainerTags(ctx, proxmoxClient, ctid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			if flagOutput == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				if tags == nil {
+					tags = []string{}
+				}
+				return enc.Encode(tags)
+			}
+			if len(tags) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "(no tags)")
+				return nil
+			}
+			for _, t := range tags {
+				fmt.Fprintln(cmd.OutOrStdout(), t)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func ctTagAddCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "add <ctid> <tag>",
+		Short: "Add a tag to a container",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			tag := args[1]
+			if err := validateTag(tag); err != nil {
+				return err
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Connecting...")
+			task, err := actions.AddContainerTag(ctx, proxmoxClient, ctid, nodeName, tag)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Tag %q added to container %d.\n", tag, ctid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func ctTagRemoveCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "remove <ctid> <tag>",
+		Short: "Remove a tag from a container",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			tag := args[1]
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Connecting...")
+			task, err := actions.RemoveContainerTag(ctx, proxmoxClient, ctid, nodeName, tag)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Tag %q removed from container %d.\n", tag, ctid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
 	return cmd
 }
 
