@@ -6,6 +6,7 @@ containers, nodes, users, and access control.
 ## Features
 
 - **VMs & containers** — list, start, stop, reboot, shutdown, clone, delete, snapshots, convert to template, disk resize, disk move, tag management
+- **Guest agent** — execute commands, query OS info and network interfaces, set passwords inside running VMs via QEMU guest agent
 - **Backups** — list, create (vzdump), delete, restore, inspect embedded config, storage discovery
 - **Nodes & cluster** — status, resources, running tasks
 - **Users & tokens** — create, delete, password, API token management
@@ -46,6 +47,12 @@ pxve backup list --vmid 101
 pxve backup restore local:backup/vzdump-qemu-101-2025_01_01-00_00_00.vma.zst \
   --node pve --vmid 200 --name restored-vm --storage local-lvm
 
+# Query guest OS info via agent
+pxve vm agent osinfo 101
+
+# Run a command inside the VM
+pxve vm agent exec 101 -- uname -a
+
 # Create a user and grant VM access
 pxve user create alice@pve --password secret
 pxve user grant alice@pve --vmid 101 --role PVEVMUser
@@ -66,6 +73,7 @@ profiles from `~/.pxve.yaml` and lets you:
 - **Select an instance** — pick from configured instances, add, remove, or discover instances inline
 - **Browse VMs & containers** — sortable table with status, CPU, memory, and disk usage; detail view shows primary disk storage in the stats line
 - **Power actions** — start, stop, shutdown, reboot, clone, delete, convert to template, resize disks, move disks between storages, and manage tags directly from the list or detail view
+- **Guest agent info** — for QEMU VMs with `qemu-guest-agent` running, the detail view shows the guest OS name and primary IP address
 - **Manage snapshots** — create, delete, and rollback snapshots from the detail view
 - **Manage backups** — create, delete, and restore backups with storage selection and VMID/name prompts
 - **Browse all backups** — cluster-wide backup view across all nodes and storages with delete and restore
@@ -148,7 +156,7 @@ pxve vm | ct  snapshot rollback <id> <name>     [--node <node>]
 pxve vm | ct  snapshot delete   <id> <name>     [--node <node>]
 ```
 
-> **Notes:** 
+> **Notes:**
 > * `vm shutdown` sends an ACPI signal (guest-initiated). `ct shutdown` sends an orderly shutdown request to the container runtime. Both are graceful, `stop` is always forceful.
 > * Clones are always **full clones** (independent of the source).
 > * `template` is **irreversible** — the VM or CT becomes read-only and can only be cloned afterwards. Use `--force` to skip the confirmation prompt.
@@ -156,6 +164,25 @@ pxve vm | ct  snapshot delete   <id> <name>     [--node <node>]
 > * `disk move` moves a disk to a different storage; if the disk argument is omitted and only one moveable disk exists it is auto-selected, otherwise a prompt is shown. The source disk is deleted after the move by default (`--delete=false` to keep it). Supports live migration on running VMs.
 > * `disk detach` (VM only) removes a disk from the VM config. Without `--delete` the data is preserved as an unused disk; with `--delete` it is permanently destroyed (confirmation required unless `--force`).
 > * `tag` names may contain letters, digits, hyphens, underscores, and dots.
+
+### Guest Agent (VMs only)
+
+Interact with the QEMU guest agent running inside a VM. Requires the VM to be running
+with `qemu-guest-agent` installed and active.
+
+```
+pxve vm agent exec         <vmid> -- <command> [args...]  [--node <node>] [--timeout <secs>] [--stdin <data>]
+pxve vm agent osinfo       <vmid>                         [--node <node>]
+pxve vm agent networks     <vmid>                         [--node <node>]
+pxve vm agent set-password <vmid> --username <user>       [--node <node>] [--password <pw>]
+```
+
+> **Notes:**
+> * `exec` runs a command inside the guest and prints stdout/stderr. Use `--` to separate pxve flags from the guest command. Default timeout is 30 seconds.
+> * `osinfo` shows the guest OS name, version, kernel, and architecture.
+> * `networks` lists guest network interfaces with MAC and IP addresses.
+> * `set-password` sets a user's password inside the guest. If `--password` is omitted, you are prompted securely (input is hidden).
+> * All agent commands support `--output json` for machine-readable output.
 
 ### Backups
 

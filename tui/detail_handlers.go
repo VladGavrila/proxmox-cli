@@ -509,6 +509,75 @@ func (m detailModel) handleTagAddMode(msg tea.KeyMsg) (detailModel, tea.Cmd) {
 	}
 }
 
+func (m detailModel) handleEditConfigMode(msg tea.KeyMsg) (detailModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = detailNormal
+		m.editNameInput.Blur()
+		m.editDescInput.Blur()
+		m.statusMsg = ""
+		m.statusErr = false
+		return m, nil
+	case "tab", "down":
+		if m.editField == 0 {
+			m.editField = 1
+			m.editNameInput.Blur()
+			m.editDescInput.Focus()
+			return m, textinput.Blink
+		}
+		m.editField = 0
+		m.editDescInput.Blur()
+		m.editNameInput.Focus()
+		return m, textinput.Blink
+	case "shift+tab", "up":
+		if m.editField == 1 {
+			m.editField = 0
+			m.editDescInput.Blur()
+			m.editNameInput.Focus()
+			return m, textinput.Blink
+		}
+		m.editField = 1
+		m.editNameInput.Blur()
+		m.editDescInput.Focus()
+		return m, textinput.Blink
+	case "enter":
+		if m.editField == 0 {
+			name := strings.TrimSpace(m.editNameInput.Value())
+			if name == "" {
+				m.statusMsg = "Name cannot be empty"
+				m.statusErr = true
+				return m, nil
+			}
+			m.editField = 1
+			m.editNameInput.Blur()
+			m.editDescInput.Focus()
+			return m, textinput.Blink
+		}
+		name := strings.TrimSpace(m.editNameInput.Value())
+		desc := m.editDescInput.Value()
+		m.editNameInput.Blur()
+		m.editDescInput.Blur()
+		if name == "" {
+			m.statusMsg = "Name cannot be empty"
+			m.statusErr = true
+			return m, nil
+		}
+		m.mode = detailNormal
+		m.actionBusy = true
+		m.statusMsg = "Updating config..."
+		m.statusErr = false
+		return m, tea.Batch(m.updateConfigCmd(name, desc), m.spinner.Tick)
+	default:
+		var cmd tea.Cmd
+		if m.editField == 0 {
+			m.editNameInput, cmd = m.editNameInput.Update(msg)
+		} else {
+			m.editDescInput, cmd = m.editDescInput.Update(msg)
+		}
+		return m, cmd
+	}
+}
+
 func (m detailModel) handleSelectMoveDiskMode(msg tea.KeyMsg) (detailModel, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
@@ -580,6 +649,8 @@ func (m detailModel) handleNormalMode(msg tea.KeyMsg) (detailModel, tea.Cmd) {
 		}
 		m.mode = detailConfirmTemplate
 		return m, nil
+	case "E":
+		return m.startAction("Loading config...", m.loadConfigCmd())
 	case "alt+z", "Ω":
 		defaultDisk := "scsi0"
 		if m.resource.Type == "lxc" {

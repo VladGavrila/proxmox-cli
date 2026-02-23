@@ -348,6 +348,24 @@ func (m detailModel) powerCmd(action string) tea.Cmd {
 	}
 }
 
+func (m detailModel) loadAgentInfoCmd() tea.Cmd {
+	c := m.client
+	r := m.resource
+	return func() tea.Msg {
+		ctx := context.Background()
+		osInfo, err := actions.VMAgentOsInfo(ctx, c, int(r.VMID), r.Node)
+		if err != nil {
+			return agentInfoLoadedMsg{available: false}
+		}
+		ifaces, _ := actions.VMAgentNetworkIfaces(ctx, c, int(r.VMID), r.Node)
+		return agentInfoLoadedMsg{
+			osInfo:    osInfo,
+			ifaces:    ifaces,
+			available: true,
+		}
+	}
+}
+
 func (m detailModel) loadPrimaryDiskCmd() tea.Cmd {
 	c := m.client
 	r := m.resource
@@ -450,6 +468,65 @@ func (m detailModel) removeTagCmd(tag string) tea.Cmd {
 		}
 		newTags := strings.Join(remaining, ";")
 		return tagUpdatedMsg{newTags: newTags, message: fmt.Sprintf("Tag %q removed", tag)}
+	}
+}
+
+func (m detailModel) loadConfigCmd() tea.Cmd {
+	c := m.client
+	r := m.resource
+	return func() tea.Msg {
+		ctx := context.Background()
+		if r.Type == "qemu" {
+			cfg, err := actions.GetVMConfig(ctx, c, int(r.VMID), r.Node)
+			if err != nil {
+				return configLoadedMsg{err: err}
+			}
+			return configLoadedMsg{name: cfg.Name, description: cfg.Description}
+		}
+		cfg, err := actions.GetContainerConfig(ctx, c, int(r.VMID), r.Node)
+		if err != nil {
+			return configLoadedMsg{err: err}
+		}
+		return configLoadedMsg{name: cfg.Hostname, description: cfg.Description}
+	}
+}
+
+func (m detailModel) updateConfigCmd(name, description string) tea.Cmd {
+	c := m.client
+	r := m.resource
+	return func() tea.Msg {
+		ctx := context.Background()
+		vmid := int(r.VMID)
+		if r.Type == "qemu" {
+			opts := []proxmox.VirtualMachineOption{
+				{Name: "name", Value: name},
+				{Name: "description", Value: description},
+			}
+			task, err := actions.ConfigVM(ctx, c, vmid, r.Node, opts)
+			if err != nil {
+				return actionResultMsg{err: err}
+			}
+			if task != nil {
+				if werr := task.WaitFor(ctx, 120); werr != nil {
+					return actionResultMsg{err: werr}
+				}
+			}
+		} else {
+			opts := []proxmox.ContainerOption{
+				{Name: "hostname", Value: name},
+				{Name: "description", Value: description},
+			}
+			task, err := actions.ConfigContainer(ctx, c, vmid, r.Node, opts)
+			if err != nil {
+				return actionResultMsg{err: err}
+			}
+			if task != nil {
+				if werr := task.WaitFor(ctx, 120); werr != nil {
+					return actionResultMsg{err: werr}
+				}
+			}
+		}
+		return actionResultMsg{message: "Config updated", needRefresh: true}
 	}
 }
 

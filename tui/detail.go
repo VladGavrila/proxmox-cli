@@ -37,6 +37,7 @@ const (
 	detailTagAdd                         // text input to add a new tag
 	detailSelectMoveDisk                 // cursor picker: choose which disk to move
 	detailSelectMoveStorage              // cursor picker: choose target storage for move
+	detailEditConfig                     // 2-field form: name/hostname + description
 )
 
 // snapshotEntry is a unified representation for both VM and CT snapshots.
@@ -146,6 +147,20 @@ type moveStoragesLoadedMsg struct {
 	err      error
 }
 
+// configLoadedMsg is sent when the current config is loaded for editing.
+type configLoadedMsg struct {
+	name        string
+	description string
+	err         error
+}
+
+// agentInfoLoadedMsg is sent when guest agent info loading completes (QEMU VMs only).
+type agentInfoLoadedMsg struct {
+	osInfo    *proxmox.AgentOsInfo
+	ifaces    []*proxmox.AgentNetworkIface
+	available bool // true if agent responded
+}
+
 // tagUpdatedMsg is sent after a tag add/remove completes, carrying the new
 // tags string so the display updates immediately without a cluster refresh.
 type tagUpdatedMsg struct {
@@ -201,12 +216,22 @@ type detailModel struct {
 
 	diskLocation string // storage name of primary disk (e.g. "local-lvm"), loaded on init
 
+	// Agent info (QEMU VMs only, loaded on init)
+	agentAvailable bool
+	agentOsInfo    *proxmox.AgentOsInfo
+	agentNetIfaces []*proxmox.AgentNetworkIface
+
 	// Tag management state
 	tagInput      textinput.Model
 	tagIdx        int      // cursor in current resource's tag list
 	instanceTags  []string // all tags in the instance (loaded on demand for picker)
 	tagSelectIdx  int      // cursor in the instance tag picker
 	tagsDirty     bool     // true after tagUpdatedMsg; prevents resourceRefreshedMsg from overwriting Tags
+
+	// Edit config state
+	editNameInput textinput.Model
+	editDescInput textinput.Model
+	editField     int // 0 = name/hostname, 1 = description
 
 	// Disk move state
 	availableDisks map[string]string
@@ -253,6 +278,14 @@ func newDetailModel(c *proxmox.Client, r proxmox.ClusterResource, w, h int) deta
 	rsizeInput.CharLimit = 10
 	rsizeInput.Width = 10
 
+	editNameInput := textinput.New()
+	editNameInput.Placeholder = "name"
+	editNameInput.CharLimit = 63
+
+	editDescInput := textinput.New()
+	editDescInput.Placeholder = "description (optional)"
+	editDescInput.CharLimit = 256
+
 	tagInput := textinput.New()
 	tagInput.Placeholder = "tag name"
 	tagInput.CharLimit = 40
@@ -274,6 +307,8 @@ func newDetailModel(c *proxmox.Client, r proxmox.ClusterResource, w, h int) deta
 		cloneNameInput:   cnameInput,
 		resizeDiskInput:  rdiskInput,
 		resizeSizeInput:  rsizeInput,
+		editNameInput:    editNameInput,
+		editDescInput:    editDescInput,
 		tagInput:         tagInput,
 		spinner:          s,
 		width:            w,
@@ -389,7 +424,11 @@ func (m detailModel) withRebuiltBackupTable() detailModel {
 }
 
 func (m detailModel) init() tea.Cmd {
-	return tea.Batch(m.loadSnapshotsCmd(), m.loadBackupsCmd(), m.loadPrimaryDiskCmd(), m.spinner.Tick)
+	cmds := []tea.Cmd{m.loadSnapshotsCmd(), m.loadBackupsCmd(), m.loadPrimaryDiskCmd(), m.spinner.Tick}
+	if m.resource.Type == "qemu" {
+		cmds = append(cmds, m.loadAgentInfoCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 func formatSnapTime(t int64) string {
@@ -554,6 +593,29 @@ func (m detailModel) update(msg tea.Msg) (detailModel, tea.Cmd) {
 		m.mode = detailTagSelect
 		return m, nil
 
+	case configLoadedMsg:
+		m.actionBusy = false
+		if msg.err != nil {
+			m.statusMsg = "Error: " + msg.err.Error()
+			m.statusErr = true
+			return m, nil
+		}
+		m.editNameInput.SetValue(msg.name)
+		m.editDescInput.SetValue(msg.description)
+		m.editField = 0
+		m.editNameInput.Focus()
+		m.editDescInput.Blur()
+		m.mode = detailEditConfig
+		return m, textinput.Blink
+
+	case agentInfoLoadedMsg:
+		m.agentAvailable = msg.available
+		if msg.available {
+			m.agentOsInfo = msg.osInfo
+			m.agentNetIfaces = msg.ifaces
+		}
+		return m, nil
+
 	case primaryDiskLoadedMsg:
 		m.diskLocation = msg.location
 		return m, nil
@@ -671,6 +733,8 @@ func (m detailModel) update(msg tea.Msg) (detailModel, tea.Cmd) {
 			return m.handleTagSelectMode(msg)
 		case detailTagAdd:
 			return m.handleTagAddMode(msg)
+		case detailEditConfig:
+			return m.handleEditConfigMode(msg)
 		}
 		// detailNormal falls through.
 		if m.actionBusy {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	proxmox "github.com/luthermonson/go-proxmox"
 
@@ -47,6 +49,8 @@ func vmCmd() *cobra.Command {
 	cmd.AddCommand(vmTemplateCmd())
 	cmd.AddCommand(vmDiskCmd())
 	cmd.AddCommand(vmTagCmd())
+	cmd.AddCommand(vmConfigCmd())
+	cmd.AddCommand(vmAgentCmd())
 	return cmd
 }
 
@@ -308,6 +312,146 @@ func vmInfoCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func vmConfigCmd() *cobra.Command {
+	var (
+		nodeName    string
+		name        string
+		description string
+		cores       int
+		sockets     int
+		memory      int
+		balloon     int
+		cpu         string
+		onboot      bool
+		noOnboot    bool
+		protection  bool
+		noProtect   bool
+	)
+	cmd := &cobra.Command{
+		Use:   "config <vmid>",
+		Short: "View or modify VM configuration",
+		Long: `View or modify a virtual machine's configuration.
+
+Without modification flags, displays the current config.
+With flags, updates the specified configuration options.`,
+		Args: cobra.ExactArgs(1),
+		Example: `  pxve vm config 100
+  pxve vm config 100 --output json
+  pxve vm config 100 --name my-vm --cores 4
+  pxve vm config 100 --onboot
+  pxve vm config 100 --no-protection`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+
+			// Build options from changed flags.
+			var opts []proxmox.VirtualMachineOption
+			if cmd.Flags().Changed("name") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "name", Value: name})
+			}
+			if cmd.Flags().Changed("description") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "description", Value: description})
+			}
+			if cmd.Flags().Changed("cores") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "cores", Value: cores})
+			}
+			if cmd.Flags().Changed("sockets") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "sockets", Value: sockets})
+			}
+			if cmd.Flags().Changed("memory") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "memory", Value: memory})
+			}
+			if cmd.Flags().Changed("balloon") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "balloon", Value: balloon})
+			}
+			if cmd.Flags().Changed("cpu") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "cpu", Value: cpu})
+			}
+			if cmd.Flags().Changed("onboot") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "onboot", Value: 1})
+			}
+			if cmd.Flags().Changed("no-onboot") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "onboot", Value: 0})
+			}
+			if cmd.Flags().Changed("protection") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "protection", Value: 1})
+			}
+			if cmd.Flags().Changed("no-protection") {
+				opts = append(opts, proxmox.VirtualMachineOption{Name: "protection", Value: 0})
+			}
+
+			if len(opts) > 0 {
+				// Modify mode.
+				s := startSpinner("Updating config...")
+				task, err := actions.ConfigVM(ctx, proxmoxClient, vmid, nodeName, opts)
+				s.Stop()
+				if err != nil {
+					return handleErr(err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Updating VM %d config...\n", vmid)
+				if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+					return handleErr(err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "VM %d config updated.\n", vmid)
+				return nil
+			}
+
+			// Read-only mode.
+			s := startSpinner("Loading...")
+			cfg, err := actions.GetVMConfig(ctx, proxmoxClient, vmid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+
+			if flagOutput == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(cfg)
+			}
+
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintf(w, "Name:\t%s\n", cfg.Name)
+			fmt.Fprintf(w, "Description:\t%s\n", cfg.Description)
+			fmt.Fprintf(w, "Cores:\t%d\n", cfg.Cores)
+			fmt.Fprintf(w, "Sockets:\t%d\n", cfg.Sockets)
+			fmt.Fprintf(w, "CPU Type:\t%s\n", cfg.CPU)
+			fmt.Fprintf(w, "Memory:\t%d MiB\n", int(cfg.Memory))
+			balloonStr := fmt.Sprintf("%d MiB", cfg.Balloon)
+			if cfg.Balloon == 0 {
+				balloonStr = "0 (disabled)"
+			}
+			fmt.Fprintf(w, "Balloon:\t%s\n", balloonStr)
+			fmt.Fprintf(w, "OnBoot:\t%s\n", yesNo(cfg.OnBoot))
+			fmt.Fprintf(w, "Protection:\t%s\n", yesNo(cfg.Protection))
+			fmt.Fprintf(w, "Boot:\t%s\n", cfg.Boot)
+			fmt.Fprintf(w, "OS Type:\t%s\n", cfg.OSType)
+			fmt.Fprintf(w, "Machine:\t%s\n", cfg.Machine)
+			fmt.Fprintf(w, "BIOS:\t%s\n", cfg.Bios)
+			return w.Flush()
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().StringVar(&name, "name", "", "set VM name")
+	cmd.Flags().StringVar(&description, "description", "", "set VM description")
+	cmd.Flags().IntVar(&cores, "cores", 0, "set number of CPU cores")
+	cmd.Flags().IntVar(&sockets, "sockets", 0, "set number of CPU sockets")
+	cmd.Flags().IntVar(&memory, "memory", 0, "set memory in MiB")
+	cmd.Flags().IntVar(&balloon, "balloon", 0, "set balloon device size in MiB (0 to disable)")
+	cmd.Flags().StringVar(&cpu, "cpu", "", "set CPU type (e.g. host, kvm64)")
+	cmd.Flags().BoolVar(&onboot, "onboot", false, "enable start on boot")
+	cmd.Flags().BoolVar(&noOnboot, "no-onboot", false, "disable start on boot")
+	cmd.Flags().BoolVar(&protection, "protection", false, "enable protection")
+	cmd.Flags().BoolVar(&noProtect, "no-protection", false, "disable protection")
 	return cmd
 }
 
@@ -926,5 +1070,215 @@ func vmSnapshotRollbackCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+// vmAgentCmd groups guest agent sub-commands.
+func vmAgentCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "agent",
+		Short: "Guest agent operations (requires qemu-guest-agent)",
+	}
+	cmd.AddCommand(vmAgentExecCmd(), vmAgentOsInfoCmd(), vmAgentNetworksCmd(), vmAgentSetPasswordCmd())
+	return cmd
+}
+
+func vmAgentExecCmd() *cobra.Command {
+	var (
+		nodeName   string
+		timeout    int
+		stdinData  string
+	)
+	cmd := &cobra.Command{
+		Use:   "exec <vmid> -- <command> [args...]",
+		Short: "Execute a command inside the VM via guest agent",
+		Long: `Execute a command inside the VM guest via the QEMU guest agent.
+
+The VM must be running and have qemu-guest-agent installed and active.
+Use -- to separate pxve flags from the guest command.`,
+		Args: cobra.MinimumNArgs(2),
+		Example: `  pxve vm agent exec 100 -- ls -la /tmp
+  pxve vm agent exec 100 -- cat /etc/os-release
+  pxve vm agent exec 100 --output json -- uname -a
+  pxve vm agent exec 100 --timeout 60 -- apt update`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			command := args[1:]
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Executing...")
+			result, err := actions.VMAgentExec(ctx, proxmoxClient, vmid, nodeName, command, stdinData, timeout)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+
+			if flagOutput == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(result)
+			}
+
+			if result.OutData != "" {
+				fmt.Fprint(cmd.OutOrStdout(), result.OutData)
+			}
+			if result.ErrData != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "stderr: %s", result.ErrData)
+			}
+			if result.ExitCode != 0 {
+				return fmt.Errorf("command exited with code %d", result.ExitCode)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().IntVar(&timeout, "timeout", 30, "timeout in seconds")
+	cmd.Flags().StringVar(&stdinData, "stdin", "", "data to pass to command stdin")
+	return cmd
+}
+
+func vmAgentOsInfoCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "osinfo <vmid>",
+		Short: "Show guest OS information via guest agent",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Loading...")
+			info, err := actions.VMAgentOsInfo(ctx, proxmoxClient, vmid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+
+			if flagOutput == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(info)
+			}
+
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintf(w, "Name:\t%s\n", info.Name)
+			fmt.Fprintf(w, "Version:\t%s\n", info.Version)
+			fmt.Fprintf(w, "Kernel:\t%s\n", info.KernelRelease)
+			fmt.Fprintf(w, "Architecture:\t%s\n", info.Machine)
+			fmt.Fprintf(w, "Pretty Name:\t%s\n", info.PrettyName)
+			return w.Flush()
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func vmAgentNetworksCmd() *cobra.Command {
+	var nodeName string
+	cmd := &cobra.Command{
+		Use:   "networks <vmid>",
+		Short: "Show guest network interfaces via guest agent",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Loading...")
+			ifaces, err := actions.VMAgentNetworkIfaces(ctx, proxmoxClient, vmid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+
+			if flagOutput == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(ifaces)
+			}
+
+			if len(ifaces) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No network interfaces reported by guest agent.")
+				return nil
+			}
+
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "INTERFACE\tMAC\tIP ADDRESSES")
+			for _, iface := range ifaces {
+				var addrs []string
+				for _, addr := range iface.IPAddresses {
+					addrs = append(addrs, fmt.Sprintf("%s:%s/%d", addr.IPAddressType, addr.IPAddress, addr.Prefix))
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\n", iface.Name, iface.HardwareAddress, strings.Join(addrs, ", "))
+			}
+			return w.Flush()
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func vmAgentSetPasswordCmd() *cobra.Command {
+	var (
+		nodeName string
+		username string
+		password string
+	)
+	cmd := &cobra.Command{
+		Use:   "set-password <vmid>",
+		Short: "Set a user password inside the VM via guest agent",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vmid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid VMID %q", args[0])
+			}
+			if username == "" {
+				return fmt.Errorf("--username is required")
+			}
+			if password == "" {
+				fmt.Fprint(cmd.OutOrStdout(), "Password: ")
+				if f, ok := cmd.InOrStdin().(*os.File); ok {
+					pwBytes, err := term.ReadPassword(int(f.Fd()))
+					if err != nil {
+						return fmt.Errorf("reading password: %w", err)
+					}
+					fmt.Fprintln(cmd.OutOrStdout())
+					password = string(pwBytes)
+				} else {
+					fmt.Fscan(cmd.InOrStdin(), &password)
+				}
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+			s := startSpinner("Setting password...")
+			err = actions.VMAgentSetPassword(ctx, proxmoxClient, vmid, nodeName, username, password)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Password set for user %q on VM %d.\n", username, vmid)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().StringVar(&username, "username", "", "guest OS username (required)")
+	cmd.Flags().StringVar(&password, "password", "", "new password (prompts if omitted)")
 	return cmd
 }

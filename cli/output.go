@@ -126,6 +126,22 @@ func formatCPUPercent(cpu float64) string {
 	return fmt.Sprintf("%.1f%%", cpu*100)
 }
 
+// yesNo returns "yes" or "no" for an int flag (0/1).
+func yesNo(v int) string {
+	if v != 0 {
+		return "yes"
+	}
+	return "no"
+}
+
+// yesNoBool returns "yes" or "no" for a bool flag.
+func yesNoBool(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
 // selectFromList auto-selects when items has exactly one entry, or prompts the
 // user to pick from a numbered list when there are multiple. noun is the
 // human-readable name of what is being selected (e.g. "disk", "volume").

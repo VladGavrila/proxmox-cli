@@ -15,7 +15,7 @@ pxve/
 ├── cli/                             # Cobra command layer (thin: parse → action → format)
 │   ├── root.go                      # Root command, global flags, initClient(), handleErr(), --tui launch
 │   ├── instance.go                  # instance add/remove/list/use/show/discover + verifyInstance()
-│   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot/template/disk/tag
+│   ├── vm.go                        # vm list/start/stop/shutdown/reboot/info/clone/delete/snapshot/template/disk/tag/agent
 │   ├── container.go                 # ct list/start/stop/shutdown/reboot/info/clone/delete/snapshot/template/disk/tag
 │   ├── backup.go                    # backup storages/list/create/delete/restore/info
 │   ├── node.go                      # node list/info
@@ -41,7 +41,7 @@ pxve/
 │   ├── errors/errors.go             # Handle() maps sentinel errors to friendly messages
 │   ├── discovery/discovery.go       # Network scan for Proxmox instances (shared by CLI + TUI)
 │   └── actions/                     # All Proxmox logic — shared by CLI and TUI
-│       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots/ConvertToTemplate
+│       ├── vm.go                    # ListVMs, FindVM, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots/ConvertToTemplate/Agent
 │       ├── container.go             # ListContainers, FindContainer, Start/Stop/Shutdown/Reboot/Clone/Delete/Snapshots/ConvertToTemplate
 │       ├── backup.go               # ListBackupStorages, ListBackups, CreateBackup, DeleteBackup, RestoreBackup, BackupConfig, NextID
 │       ├── node.go                  # ListNodes, GetNode
@@ -128,6 +128,21 @@ pxve/
   helper that splits on `;` and filters empty strings. `AllInstanceTags(ctx, c)` (in
   `cluster.go`) scans all cluster resources and returns a sorted, deduplicated list of every
   tag in use across the instance — used by the TUI tag picker.
+- **Guest agent actions** (`vm.go`): QEMU-only operations that communicate with the
+  `qemu-guest-agent` running inside a VM. The VM must be running with the agent active.
+  - `VMAgentExec(ctx, c, vmid, nodeName, command, inputData, timeoutSecs)` — executes a
+    command inside the guest. `command` is a string slice (`["ls", "-la"]`). `inputData`
+    is optional stdin. Calls `vm.AgentExec()` to get a PID, then `vm.WaitForAgentExecExit()`
+    to poll until completion or timeout. Returns `*proxmox.AgentExecStatus` with `OutData`,
+    `ErrData`, `ExitCode`.
+  - `VMAgentOsInfo(ctx, c, vmid, nodeName)` — returns `*proxmox.AgentOsInfo` with fields:
+    `Name`, `Version`, `KernelRelease`, `Machine`, `PrettyName`.
+  - `VMAgentNetworkIfaces(ctx, c, vmid, nodeName)` — returns `[]*proxmox.AgentNetworkIface`
+    with `Name`, `HardwareAddress`, and `IPAddresses` (each has `IPAddressType`, `IPAddress`,
+    `Prefix`). The go-proxmox library already filters out the loopback interface.
+  - `VMAgentSetPassword(ctx, c, vmid, nodeName, username, password)` — sets a user's
+    password inside the guest OS. Note the library signature is `(ctx, password, username)`
+    — the action wraps this to use the more natural `(username, password)` order.
 - **Backup actions** (`backup.go`): `ListBackupStorages` filters storages by `backup`
   content type. `ListRestoreStorages` filters by `images` (qemu) or `rootdir` (lxc)
   content type — these are distinct because backup-capable storages (e.g. `local`)
@@ -365,7 +380,7 @@ The detail screen logic is split across three files in the same package:
 | File | Responsibility |
 |---|---|
 | `detail.go` | `detailMode` enum, all data/message types, `detailModel` struct, `newDetailModel`, `withRebuilt*`, `init`, `formatSnapTime`, the full `update()` state machine, `selectedSnapshot/BackupInfo` helpers |
-| `detail_cmds.go` | All `tea.Cmd` closures: load (snapshots, backups, storages, nextID, primary disk), power, delete, clone, template, resize/move disk, snapshot CRUD, backup CRUD, tag CRUD |
+| `detail_cmds.go` | All `tea.Cmd` closures: load (snapshots, backups, storages, nextID, primary disk, agent info), power, delete, clone, template, resize/move disk, snapshot CRUD, backup CRUD, tag CRUD |
 | `detail_view.go` | `view()`, `renderTabBar()`, `viewSnapshotsTab()`, `viewBackupsTab()`, `viewOverlay()`, `formatUptime()` |
 
 **`diskLocation` / `primaryDiskLoadedMsg` / `loadPrimaryDiskCmd`**: On detail screen init,
@@ -480,6 +495,37 @@ using `formatTagsCell()`: up to 2 tags joined by `, `, then `+N` for overflow.
 **CLI**: `pxve vm tag list/add/remove <vmid>` and `pxve ct tag list/add/remove <ctid>`
 call the same action layer functions.
 
+### Guest Agent Info (QEMU VMs only)
+
+The detail screen automatically queries the QEMU guest agent on init for running VMs.
+If the agent is available, an extra line appears in the header showing the guest OS name
+and primary IP address:
+
+```
+VM 100: my-vm  running
+Node: pve1   Disk: local-lvm   CPU: 12.3%   Mem: 2.1 GiB / 4.0 GiB   Uptime: 3d 5h 12m
+OS: Ubuntu 22.04.3 LTS   IP: 10.0.0.5
+Tags: prod, web-server
+```
+
+**Implementation**:
+- `loadAgentInfoCmd()` in `detail_cmds.go` calls `actions.VMAgentOsInfo()` and
+  `actions.VMAgentNetworkIfaces()`. If the OS info call fails (agent not running,
+  VM stopped, agent not installed), `agentInfoLoadedMsg{available: false}` is returned
+  and no agent line is shown — silent failure by design.
+- `agentInfoLoadedMsg` carries `osInfo *proxmox.AgentOsInfo`, `ifaces []*proxmox.AgentNetworkIface`,
+  and `available bool`. The handler stores these on `detailModel.agentAvailable`,
+  `.agentOsInfo`, and `.agentNetIfaces`.
+- `primaryAgentIP()` helper in `detail_view.go` iterates interfaces, skips `lo`, and
+  returns the first IPv4 address found.
+- The agent info load is only batched for `resource.Type == "qemu"` — LXC containers
+  do not have a guest agent (they have direct OS access).
+
+**CLI**: `pxve vm agent exec/osinfo/networks/set-password <vmid>` provides full guest
+agent access from the command line. `exec` supports `--timeout`, `--stdin`, and
+`--output json`. `set-password` prompts securely for the password if `--password` is
+omitted (uses `golang.org/x/term` for hidden input).
+
 ### Shared styles (`tui/styles.go`)
 
 All screens use the styles defined in `styles.go` (`StyleTitle`, `StyleError`,
@@ -502,7 +548,8 @@ braille spinner used in the CLI output.
 
 - Import path: `github.com/luthermonson/go-proxmox` (alias `proxmox` in all files)
 - Key types: `proxmox.Client`, `proxmox.VirtualMachine`, `proxmox.Container`,
-  `proxmox.Node`, `proxmox.Task`, `proxmox.ClusterResources`
+  `proxmox.Node`, `proxmox.Task`, `proxmox.ClusterResources`,
+  `proxmox.AgentOsInfo`, `proxmox.AgentNetworkIface`, `proxmox.AgentExecStatus`
 - Sentinel errors: `proxmox.ErrNotAuthorized`, `proxmox.ErrNotFound`,
   `proxmox.ErrTimeout` — checked with `proxmox.IsNotAuthorized(err)` etc.
 - `proxmox.ClusterResources` is `[]*proxmox.ClusterResource` — used by `ListVMs` and

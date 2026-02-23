@@ -248,6 +248,26 @@ func DetachVMDisk(ctx context.Context, c *proxmox.Client, vmid int, nodeName, di
 	return vm.UnlinkDisk(ctx, disk, deleteData)
 }
 
+// GetVMConfig returns the full configuration of a VM.
+func GetVMConfig(ctx context.Context, c *proxmox.Client, vmid int, nodeName string) (*proxmox.VirtualMachineConfig, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.VirtualMachineConfig, nil
+}
+
+// ConfigVM updates a VM's configuration and returns the resulting task.
+func ConfigVM(ctx context.Context, c *proxmox.Client, vmid int, nodeName string, opts []proxmox.VirtualMachineOption) (*proxmox.Task, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	expanded := make([]proxmox.VirtualMachineOption, len(opts))
+	copy(expanded, opts)
+	return vm.Config(ctx, expanded...)
+}
+
 // DeleteVMSnapshot deletes a VM snapshot. The go-proxmox library does not expose
 // this method, so we call the Proxmox REST API directly.
 func DeleteVMSnapshot(ctx context.Context, c *proxmox.Client, vmid int, nodeName, name string) (*proxmox.Task, error) {
@@ -261,4 +281,45 @@ func DeleteVMSnapshot(ctx context.Context, c *proxmox.Client, vmid int, nodeName
 		return nil, err
 	}
 	return proxmox.NewTask(upid, c), nil
+}
+
+// VMAgentExec executes a command inside the VM guest via the QEMU guest agent.
+// Returns the execution result after waiting up to timeoutSecs.
+func VMAgentExec(ctx context.Context, c *proxmox.Client, vmid int, nodeName string, command []string, inputData string, timeoutSecs int) (*proxmox.AgentExecStatus, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	pid, err := vm.AgentExec(ctx, command, inputData)
+	if err != nil {
+		return nil, err
+	}
+	return vm.WaitForAgentExecExit(ctx, pid, timeoutSecs)
+}
+
+// VMAgentOsInfo returns OS information from the guest agent.
+func VMAgentOsInfo(ctx context.Context, c *proxmox.Client, vmid int, nodeName string) (*proxmox.AgentOsInfo, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.AgentOsInfo(ctx)
+}
+
+// VMAgentNetworkIfaces returns network interfaces from the guest agent.
+func VMAgentNetworkIfaces(ctx context.Context, c *proxmox.Client, vmid int, nodeName string) ([]*proxmox.AgentNetworkIface, error) {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return vm.AgentGetNetworkIFaces(ctx)
+}
+
+// VMAgentSetPassword sets a user's password inside the VM via the guest agent.
+func VMAgentSetPassword(ctx context.Context, c *proxmox.Client, vmid int, nodeName, username, password string) error {
+	vm, err := FindVM(ctx, c, vmid, nodeName)
+	if err != nil {
+		return err
+	}
+	return vm.AgentSetUserPassword(ctx, password, username)
 }

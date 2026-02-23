@@ -34,6 +34,7 @@ func containerCmd() *cobra.Command {
 	cmd.AddCommand(ctTemplateCmd())
 	cmd.AddCommand(ctDiskCmd())
 	cmd.AddCommand(ctTagCmd())
+	cmd.AddCommand(ctConfigCmd())
 	return cmd
 }
 
@@ -665,6 +666,129 @@ func ctTagRemoveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	return cmd
+}
+
+func ctConfigCmd() *cobra.Command {
+	var (
+		nodeName    string
+		hostname    string
+		description string
+		cores       int
+		memory      int
+		swap        int
+		onboot      bool
+		noOnboot    bool
+		protection  bool
+		noProtect   bool
+	)
+	cmd := &cobra.Command{
+		Use:   "config <ctid>",
+		Short: "View or modify container configuration",
+		Long: `View or modify a container's configuration.
+
+Without modification flags, displays the current config.
+With flags, updates the specified configuration options.`,
+		Args: cobra.ExactArgs(1),
+		Example: `  pxve ct config 101
+  pxve ct config 101 --output json
+  pxve ct config 101 --hostname my-ct --memory 2048
+  pxve ct config 101 --onboot
+  pxve ct config 101 --no-protection`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid CTID %q", args[0])
+			}
+			if err := initClient(cmd); err != nil {
+				return err
+			}
+			ctx := context.Background()
+
+			// Build options from changed flags.
+			var opts []proxmox.ContainerOption
+			if cmd.Flags().Changed("hostname") {
+				opts = append(opts, proxmox.ContainerOption{Name: "hostname", Value: hostname})
+			}
+			if cmd.Flags().Changed("description") {
+				opts = append(opts, proxmox.ContainerOption{Name: "description", Value: description})
+			}
+			if cmd.Flags().Changed("cores") {
+				opts = append(opts, proxmox.ContainerOption{Name: "cores", Value: cores})
+			}
+			if cmd.Flags().Changed("memory") {
+				opts = append(opts, proxmox.ContainerOption{Name: "memory", Value: memory})
+			}
+			if cmd.Flags().Changed("swap") {
+				opts = append(opts, proxmox.ContainerOption{Name: "swap", Value: swap})
+			}
+			if cmd.Flags().Changed("onboot") {
+				opts = append(opts, proxmox.ContainerOption{Name: "onboot", Value: 1})
+			}
+			if cmd.Flags().Changed("no-onboot") {
+				opts = append(opts, proxmox.ContainerOption{Name: "onboot", Value: 0})
+			}
+			if cmd.Flags().Changed("protection") {
+				opts = append(opts, proxmox.ContainerOption{Name: "protection", Value: 1})
+			}
+			if cmd.Flags().Changed("no-protection") {
+				opts = append(opts, proxmox.ContainerOption{Name: "protection", Value: 0})
+			}
+
+			if len(opts) > 0 {
+				// Modify mode.
+				s := startSpinner("Updating config...")
+				task, err := actions.ConfigContainer(ctx, proxmoxClient, ctid, nodeName, opts)
+				s.Stop()
+				if err != nil {
+					return handleErr(err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Updating container %d config...\n", ctid)
+				if err := watchTask(ctx, cmd.OutOrStdout(), task); err != nil {
+					return handleErr(err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Container %d config updated.\n", ctid)
+				return nil
+			}
+
+			// Read-only mode.
+			s := startSpinner("Loading...")
+			cfg, err := actions.GetContainerConfig(ctx, proxmoxClient, ctid, nodeName)
+			s.Stop()
+			if err != nil {
+				return handleErr(err)
+			}
+
+			if flagOutput == "json" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(cfg)
+			}
+
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintf(w, "Hostname:\t%s\n", cfg.Hostname)
+			fmt.Fprintf(w, "Description:\t%s\n", cfg.Description)
+			fmt.Fprintf(w, "Cores:\t%d\n", cfg.Cores)
+			fmt.Fprintf(w, "Memory:\t%d MiB\n", cfg.Memory)
+			fmt.Fprintf(w, "Swap:\t%d MiB\n", cfg.Swap)
+			fmt.Fprintf(w, "OnBoot:\t%s\n", yesNoBool(bool(cfg.OnBoot)))
+			fmt.Fprintf(w, "Protection:\t%s\n", yesNoBool(bool(cfg.Protection)))
+			fmt.Fprintf(w, "OS Type:\t%s\n", cfg.OSType)
+			fmt.Fprintf(w, "Arch:\t%s\n", cfg.Arch)
+			fmt.Fprintf(w, "Unprivileged:\t%s\n", yesNoBool(bool(cfg.Unprivileged)))
+			return w.Flush()
+		},
+	}
+	cmd.Flags().StringVar(&nodeName, "node", "", "node name")
+	cmd.Flags().StringVar(&hostname, "hostname", "", "set container hostname")
+	cmd.Flags().StringVar(&description, "description", "", "set container description")
+	cmd.Flags().IntVar(&cores, "cores", 0, "set number of CPU cores")
+	cmd.Flags().IntVar(&memory, "memory", 0, "set memory in MiB")
+	cmd.Flags().IntVar(&swap, "swap", 0, "set swap in MiB")
+	cmd.Flags().BoolVar(&onboot, "onboot", false, "enable start on boot")
+	cmd.Flags().BoolVar(&noOnboot, "no-onboot", false, "disable start on boot")
+	cmd.Flags().BoolVar(&protection, "protection", false, "enable protection")
+	cmd.Flags().BoolVar(&noProtect, "no-protection", false, "disable protection")
 	return cmd
 }
 

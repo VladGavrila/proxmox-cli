@@ -53,12 +53,20 @@ func (m detailModel) view() string {
 	lines = append(lines, headerLine(title, m.width, m.lastRefreshed))
 	lines = append(lines, stats)
 
+	if m.agentAvailable && m.agentOsInfo != nil {
+		agentLine := StyleDim.Render("OS: ") + StyleAgent.Render(m.agentOsInfo.PrettyName)
+		if ip := m.primaryAgentIP(); ip != "" {
+			agentLine += StyleDim.Render("   IP: ") + StyleAgent.Render(ip)
+		}
+		lines = append(lines, agentLine)
+	}
+
 	if r.Tags != "" {
 		tags := parseTags(r.Tags)
 		lines = append(lines, StyleDim.Render("Tags: ")+StyleTag.Render(strings.Join(tags, ", ")))
 	}
 
-	lines = append(lines, renderHelp("[s] start  [S] stop  [U] shutdown  [R] reboot  [c] clone  [D] delete  [T] template"))
+	lines = append(lines, renderHelp("[s] start  [S] stop  [U] shutdown  [R] reboot  [c] clone  [D] delete  [T] template  [E] edit"))
 	lines = append(lines, renderHelp("[Alt+z] resize disk  [Alt+m] move disk  [Alt+t] tags"))
 	lines = append(lines, sep)
 
@@ -320,6 +328,24 @@ func (m detailModel) viewOverlay() []string {
 		}
 		lines = append(lines, renderHelp("[↑/↓] navigate   [Enter] select   [Esc] cancel"))
 
+	case detailEditConfig:
+		nameLabel := "Name"
+		if m.resource.Type == "lxc" {
+			nameLabel = "Hostname"
+		}
+		lines = append(lines, "")
+		lines = append(lines, StyleWarning.Render(fmt.Sprintf("Edit %s %d config", m.typeStr(), m.resource.VMID)))
+		nLabel := StyleDim.Render(fmt.Sprintf("  %s: ", nameLabel))
+		dLabel := StyleDim.Render("  Description: ")
+		if m.editField == 0 {
+			nLabel = StyleWarning.Render(fmt.Sprintf("> %s: ", nameLabel))
+		} else {
+			dLabel = StyleWarning.Render("> Description: ")
+		}
+		lines = append(lines, nLabel+m.editNameInput.View())
+		lines = append(lines, dLabel+m.editDescInput.View())
+		lines = append(lines, renderHelp("[Tab] switch field  [Enter] confirm  [Esc] cancel"))
+
 	default:
 		lines = append(lines, "")
 		if m.activeTab == 0 {
@@ -338,6 +364,21 @@ func (m detailModel) viewOverlay() []string {
 	}
 
 	return lines
+}
+
+// primaryAgentIP returns the first non-loopback IPv4 address from agent interfaces.
+func (m detailModel) primaryAgentIP() string {
+	for _, iface := range m.agentNetIfaces {
+		if iface.Name == "lo" {
+			continue
+		}
+		for _, addr := range iface.IPAddresses {
+			if addr.IPAddressType == "ipv4" {
+				return addr.IPAddress
+			}
+		}
+	}
+	return ""
 }
 
 // formatUptime converts seconds to a human-readable uptime string.

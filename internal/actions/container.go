@@ -214,6 +214,26 @@ func MoveContainerVolume(ctx context.Context, c *proxmox.Client, ctid int, nodeN
 	return ct.MoveVolume(ctx, opts)
 }
 
+// GetContainerConfig returns the full configuration of a container.
+func GetContainerConfig(ctx context.Context, c *proxmox.Client, ctid int, nodeName string) (*proxmox.ContainerConfig, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	return ct.ContainerConfig, nil
+}
+
+// ConfigContainer updates a container's configuration and returns the resulting task.
+func ConfigContainer(ctx context.Context, c *proxmox.Client, ctid int, nodeName string, opts []proxmox.ContainerOption) (*proxmox.Task, error) {
+	ct, err := FindContainer(ctx, c, ctid, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	expanded := make([]proxmox.ContainerOption, len(opts))
+	copy(expanded, opts)
+	return ct.Config(ctx, expanded...)
+}
+
 // CloneContainer clones a container to a new ID. If newid is 0, the next available ID is used.
 func CloneContainer(ctx context.Context, c *proxmox.Client, ctid, newid int, nodeName, name string) (int, *proxmox.Task, error) {
 	if newid == 0 {

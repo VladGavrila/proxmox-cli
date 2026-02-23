@@ -21,6 +21,7 @@ var (
 	StyleRunning  = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
 	StyleStopped  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	StyleSpinner  = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	StyleAgent    = lipgloss.NewStyle().Foreground(lipgloss.Color("135"))
 )
 
 // renderHelp renders a help string with keybinding hints — text inside [ ] —
