@@ -10,11 +10,13 @@ containers, nodes, users, and access control.
 - **Backups** — list, create (vzdump), delete, restore, inspect embedded config, storage discovery
 - **Nodes & cluster** — status, resources, running tasks
 - **Users & tokens** — create, delete, password, API token management
+- **Groups** — list, create, delete, show, add/remove members
 - **ACLs** — grant and revoke roles on VMs, containers, or arbitrary paths
 - **Multi-instance** — manage multiple Proxmox servers with named profiles
 - **Instance discovery** — scan any subnet for Proxmox instances on port 8006
 - **Output formats** — human-readable tables or `--output json`
-- **Interactive TUI** — full-screen terminal UI for browsing and managing instances, VMs, containers, backups, users, and snapshots
+- **Table filtering** — press `/` in any TUI table to filter rows by keyword
+- **Interactive TUI** — full-screen terminal UI for browsing and managing instances, VMs, containers, backups, users, groups, and snapshots
 
 ## Quick Start
 
@@ -56,6 +58,11 @@ pxve vm agent exec 101 -- uname -a
 # Create a user and grant VM access
 pxve user create alice@pve --password secret
 pxve user grant alice@pve --vmid 101 --role PVEVMUser
+
+# Manage groups
+pxve group create admins --comment "Administrators"
+pxve group add-member admins alice@pve
+pxve group show admins
 ```
 
 ## Interactive TUI
@@ -78,10 +85,12 @@ profiles from `~/.pxve.yaml` and lets you:
 - **Manage backups** — create, delete, and restore backups with storage selection and VMID/name prompts
 - **Browse all backups** — cluster-wide backup view across all nodes and storages with delete and restore
 - **Manage users** — list, create, and delete Proxmox users
+- **Manage groups** — list, create, delete groups; view members, add/remove members with a picker or free text
 - **Manage tokens & ACLs** — create/delete API tokens, grant/revoke ACL roles per user
+- **Filter any table** — press `/` to filter rows by keyword, `Ctrl+U` to clear
 
-Navigation: **Enter** to select, **Esc** to go back, **Tab** to cycle between
-VMs, Users, and Backups views, **Q** or **Ctrl+C** to quit.
+Navigation: **Enter** to select, **Esc** to go back, **Tab** / **Shift+Tab** to cycle between
+Resources, Users, Groups, and Backups views, **Q** or **Ctrl+C** to quit.
 
 Key bindings use plain letters for resource actions (lowercase for safe
 actions, uppercase for destructive) and **Alt/Option+key** for
@@ -215,6 +224,24 @@ pxve cluster status
 pxve cluster resources
 pxve cluster tasks
 ```
+
+### Groups
+
+```
+pxve group list
+pxve group create <groupid>                [--comment <text>]
+pxve group delete <groupid>                [--force]
+pxve group show   <groupid>
+pxve group add-member    <groupid> <userid>
+pxve group remove-member <groupid> <userid>
+```
+
+> **Notes:**
+> * Alias: `pxve grp` works as a shorthand for `pxve group`.
+> * `create` accepts an optional `--comment` to describe the group.
+> * `delete` prompts for confirmation unless `--force` is given.
+> * `show` displays the group's comment and full member list.
+> * `add-member` / `remove-member` manage group membership by updating the user's group list on the Proxmox server.
 
 ### Users & Access
 

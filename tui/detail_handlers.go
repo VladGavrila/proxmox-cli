@@ -627,7 +627,41 @@ func (m detailModel) handleSelectMoveStorageMode(msg tea.KeyMsg) (detailModel, t
 // delegation for unmatched keys so that arrow-key navigation continues to work
 // when no action overlay is active.
 func (m detailModel) handleNormalMode(msg tea.KeyMsg) (detailModel, tea.Cmd) {
+	// Filter input mode.
+	if m.activeTab == 0 && m.snapFilter.active {
+		var rebuild bool
+		m.snapFilter, rebuild = m.snapFilter.handleKey(msg)
+		if rebuild {
+			m = m.withRebuiltSnapTable()
+		}
+		return m, nil
+	}
+	if m.activeTab == 1 && m.backupFilter.active {
+		var rebuild bool
+		m.backupFilter, rebuild = m.backupFilter.handleKey(msg)
+		if rebuild {
+			m = m.withRebuiltBackupTable()
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
+	case "/":
+		if m.activeTab == 0 {
+			m.snapFilter.active = true
+		} else {
+			m.backupFilter.active = true
+		}
+		return m, nil
+	case "ctrl+u":
+		if m.activeTab == 0 && m.snapFilter.hasActiveFilter() {
+			m.snapFilter.text = ""
+			m = m.withRebuiltSnapTable()
+		} else if m.activeTab == 1 && m.backupFilter.hasActiveFilter() {
+			m.backupFilter.text = ""
+			m = m.withRebuiltBackupTable()
+		}
+		return m, nil
 	case "s":
 		return m.startAction("Starting...", m.powerCmd("start"))
 	case "S":

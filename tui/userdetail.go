@@ -77,6 +77,12 @@ type userDetailModel struct {
 	statusErr     bool
 	lastRefreshed time.Time
 
+	// Filter state
+	tokenFilter          tableFilter
+	aclFilter            tableFilter
+	filteredTokenIndices []int // maps table row → m.tokens index
+	filteredACLIndices   []int // maps table row → m.acls index
+
 	width  int
 	height int
 }
@@ -131,13 +137,18 @@ func (m userDetailModel) withRebuiltTables() userDetailModel {
 		{Title: "EXPIRES", Width: expiresWidth},
 		{Title: "PRIVSEP", Width: privsepWidth},
 	}
-	tokenRows := make([]table.Row, len(m.tokens))
+	var tokenRows []table.Row
+	m.filteredTokenIndices = nil
 	for i, tok := range m.tokens {
+		if !m.tokenFilter.matches(tok.TokenID, tok.Comment) {
+			continue
+		}
 		privsep := "no"
 		if bool(tok.Privsep) {
 			privsep = "yes"
 		}
-		tokenRows[i] = table.Row{tok.TokenID, tok.Comment, formatTokenExpire(tok.Expire), privsep}
+		tokenRows = append(tokenRows, table.Row{tok.TokenID, tok.Comment, formatTokenExpire(tok.Expire), privsep})
+		m.filteredTokenIndices = append(m.filteredTokenIndices, i)
 	}
 
 	// ACLs table.
@@ -156,23 +167,28 @@ func (m userDetailModel) withRebuiltTables() userDetailModel {
 		{Title: "ROLE", Width: roleWidth},
 		{Title: "PROPAGATE", Width: propagateWidth},
 	}
-	aclRows := make([]table.Row, len(m.acls))
+	var aclRows []table.Row
+	m.filteredACLIndices = nil
 	for i, acl := range m.acls {
+		if !m.aclFilter.matches(acl.Path, acl.RoleID) {
+			continue
+		}
 		propagate := "no"
 		if bool(acl.Propagate) {
 			propagate = "yes"
 		}
-		aclRows[i] = table.Row{acl.Path, acl.RoleID, propagate}
+		aclRows = append(aclRows, table.Row{acl.Path, acl.RoleID, propagate})
+		m.filteredACLIndices = append(m.filteredACLIndices, i)
 	}
 
-	// Fixed overhead: padding(2) + title(1) + tabBar(1) + blank(1) + count(1) + status(1) + help(2) = 9
-	// Plus table header+border(2) = 11.
+	// Fixed overhead: padding(2) + title(1) + tabBar(1) + blank(1) + count(1) + status(1) + help(2) + filter(1) = 10
+	// Plus table header+border(2) = 12.
 	// ACLs tab adds roles hint lines: 1 (header) + ceil(len(roles)/3).
 	rolesLines := 0
 	if len(m.roles) > 0 {
 		rolesLines = 1 + (len(m.roles)+2)/3
 	}
-	overhead := 11 + rolesLines
+	overhead := 12 + rolesLines
 	tableHeight := m.height - overhead
 	if tableHeight < 3 {
 		tableHeight = 3
@@ -327,14 +343,14 @@ func (m userDetailModel) update(msg tea.Msg) (userDetailModel, tea.Cmd) {
 			switch msg.String() {
 			case "enter":
 				m.mode = userDetailNormal
-				if len(m.tokens) == 0 {
+				if len(m.filteredTokenIndices) == 0 {
 					return m, nil
 				}
 				cursor := m.tokensTable.Cursor()
-				if cursor < 0 || cursor >= len(m.tokens) {
+				if cursor < 0 || cursor >= len(m.filteredTokenIndices) {
 					return m, nil
 				}
-				tokenID := m.tokens[cursor].TokenID
+				tokenID := m.tokens[m.filteredTokenIndices[cursor]].TokenID
 				return m, m.deleteTokenCmd(tokenID)
 			case "esc":
 				m.mode = userDetailNormal
@@ -380,14 +396,14 @@ func (m userDetailModel) update(msg tea.Msg) (userDetailModel, tea.Cmd) {
 			switch msg.String() {
 			case "enter":
 				m.mode = userDetailNormal
-				if len(m.acls) == 0 {
+				if len(m.filteredACLIndices) == 0 {
 					return m, nil
 				}
 				cursor := m.aclsTable.Cursor()
-				if cursor < 0 || cursor >= len(m.acls) {
+				if cursor < 0 || cursor >= len(m.filteredACLIndices) {
 					return m, nil
 				}
-				acl := m.acls[cursor]
+				acl := m.acls[m.filteredACLIndices[cursor]]
 				return m, m.revokeCmd(acl.Path, acl.RoleID)
 			case "esc":
 				m.mode = userDetailNormal
@@ -396,8 +412,42 @@ func (m userDetailModel) update(msg tea.Msg) (userDetailModel, tea.Cmd) {
 			return m, nil
 		}
 
+		// Filter input mode.
+		if (m.activeTab == 0 && m.tokenFilter.active) || (m.activeTab == 1 && m.aclFilter.active) {
+			if m.activeTab == 0 {
+				var rebuild bool
+				m.tokenFilter, rebuild = m.tokenFilter.handleKey(msg)
+				if rebuild {
+					m = m.withRebuiltTables()
+				}
+			} else {
+				var rebuild bool
+				m.aclFilter, rebuild = m.aclFilter.handleKey(msg)
+				if rebuild {
+					m = m.withRebuiltTables()
+				}
+			}
+			return m, nil
+		}
+
 		// Normal mode.
 		switch msg.String() {
+		case "/":
+			if m.activeTab == 0 {
+				m.tokenFilter.active = true
+			} else {
+				m.aclFilter.active = true
+			}
+			return m, nil
+		case "ctrl+u":
+			if m.activeTab == 0 && m.tokenFilter.hasActiveFilter() {
+				m.tokenFilter.text = ""
+				m = m.withRebuiltTables()
+			} else if m.activeTab == 1 && m.aclFilter.hasActiveFilter() {
+				m.aclFilter.text = ""
+				m = m.withRebuiltTables()
+			}
+			return m, nil
 		case "tab":
 			m.activeTab = 1 - m.activeTab // toggle between 0 and 1
 			return m, nil
@@ -452,6 +502,14 @@ func (m userDetailModel) update(msg tea.Msg) (userDetailModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.aclsTable, cmd = m.aclsTable.Update(msg)
 	return m, cmd
+}
+
+// activeFilter returns the filter for the currently active tab.
+func (m userDetailModel) activeFilter() tableFilter {
+	if m.activeTab == 0 {
+		return m.tokenFilter
+	}
+	return m.aclFilter
 }
 
 func (m *userDetailModel) clearGrantForm() {
@@ -529,12 +587,24 @@ func (m userDetailModel) view() string {
 	// Content based on active tab.
 	if m.activeTab == 0 {
 		// Tokens tab.
-		tokenCount := StyleDim.Render(fmt.Sprintf("Tokens (%d)", len(m.tokens)))
+		var tokenCount string
+		if m.tokenFilter.hasActiveFilter() {
+			tokenCount = StyleDim.Render(fmt.Sprintf("Tokens (%d/%d)", len(m.filteredTokenIndices), len(m.tokens)))
+		} else {
+			tokenCount = StyleDim.Render(fmt.Sprintf("Tokens (%d)", len(m.tokens)))
+		}
 		lines = append(lines, tokenCount)
 		if len(m.tokens) == 0 {
 			lines = append(lines, StyleDim.Render("  No API tokens"))
 		} else {
 			lines = append(lines, m.tokensTable.View())
+		}
+
+		// Filter line.
+		if fl := m.tokenFilter.renderLine(); fl != "" {
+			lines = append(lines, fl)
+		} else {
+			lines = append(lines, "")
 		}
 
 		// Mode overlays for tokens.
@@ -546,8 +616,8 @@ func (m userDetailModel) view() string {
 		case userDetailConfirmDeleteToken:
 			cursor := m.tokensTable.Cursor()
 			name := ""
-			if cursor >= 0 && cursor < len(m.tokens) {
-				name = m.tokens[cursor].TokenID
+			if cursor >= 0 && cursor < len(m.filteredTokenIndices) {
+				name = m.tokens[m.filteredTokenIndices[cursor]].TokenID
 			}
 			lines = append(lines, "")
 			lines = append(lines, StyleWarning.Render(
@@ -555,17 +625,29 @@ func (m userDetailModel) view() string {
 			))
 		default:
 			lines = append(lines, m.statusLine())
-			lines = append(lines, renderHelp("[t] new token   [d] delete  |  [Tab] ACLs  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[t] new token   [d] delete  [/] filter  |  [Tab] ACLs  |  [ctrl+r] refresh"))
 			lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 		}
 	} else {
 		// ACLs tab.
-		aclCount := StyleDim.Render(fmt.Sprintf("ACLs (%d)", len(m.acls)))
+		var aclCount string
+		if m.aclFilter.hasActiveFilter() {
+			aclCount = StyleDim.Render(fmt.Sprintf("ACLs (%d/%d)", len(m.filteredACLIndices), len(m.acls)))
+		} else {
+			aclCount = StyleDim.Render(fmt.Sprintf("ACLs (%d)", len(m.acls)))
+		}
 		lines = append(lines, aclCount)
 		if len(m.acls) == 0 {
 			lines = append(lines, StyleDim.Render("  No ACLs for this user"))
 		} else {
 			lines = append(lines, m.aclsTable.View())
+		}
+
+		// Filter line.
+		if fl := m.aclFilter.renderLine(); fl != "" {
+			lines = append(lines, fl)
+		} else {
+			lines = append(lines, "")
 		}
 
 		// Show available roles as a hint (3 per line).
@@ -598,9 +680,10 @@ func (m userDetailModel) view() string {
 		case userDetailConfirmRevoke:
 			cursor := m.aclsTable.Cursor()
 			var path, role string
-			if cursor >= 0 && cursor < len(m.acls) {
-				path = m.acls[cursor].Path
-				role = m.acls[cursor].RoleID
+			if cursor >= 0 && cursor < len(m.filteredACLIndices) {
+				acl := m.acls[m.filteredACLIndices[cursor]]
+				path = acl.Path
+				role = acl.RoleID
 			}
 			lines = append(lines, "")
 			lines = append(lines, StyleWarning.Render(
@@ -608,7 +691,7 @@ func (m userDetailModel) view() string {
 			))
 		default:
 			lines = append(lines, m.statusLine())
-			lines = append(lines, renderHelp("[g] grant   [r] revoke  |  [Tab] Tokens  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[g] grant   [r] revoke  [/] filter  |  [Tab] Tokens  |  [ctrl+r] refresh"))
 			lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 		}
 	}

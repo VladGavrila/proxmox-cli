@@ -92,6 +92,7 @@ func Execute() {
 	rootCmd.AddCommand(aclCmd())
 	rootCmd.AddCommand(roleCmd())
 	rootCmd.AddCommand(backupCmd())
+	rootCmd.AddCommand(groupCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)

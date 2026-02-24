@@ -70,6 +70,10 @@ type listModel struct {
 	moveStorages    []storageChoice
 	moveStorageIdx  int
 
+	// Filter state
+	filter          tableFilter
+	filteredIndices []int // maps table row index → m.resources index
+
 	width  int
 	height int
 }
@@ -142,18 +146,23 @@ func (m listModel) withRebuiltTable() listModel {
 		{Title: "TAGS", Width: 15},
 	}
 
-	rows := make([]table.Row, len(m.resources))
+	var rows []table.Row
+	m.filteredIndices = nil
 	for i, r := range m.resources {
 		typeStr := "VM"
 		if r.Type == "lxc" {
 			typeStr = "CT"
 		}
+		vmidStr := fmt.Sprintf("%d", r.VMID)
+		if !m.filter.matches(vmidStr, r.Name, typeStr, r.Node, r.Status, r.Tags) {
+			continue
+		}
 		tmpl := ""
 		if r.Template == 1 {
 			tmpl = "✓"
 		}
-		rows[i] = table.Row{
-			fmt.Sprintf("%d", r.VMID),
+		rows = append(rows, table.Row{
+			vmidStr,
 			typeStr,
 			tmpl,
 			r.Name,
@@ -163,10 +172,11 @@ func (m listModel) withRebuiltTable() listModel {
 			formatBytes(r.Mem),
 			formatBytes(r.MaxDisk),
 			formatTagsCell(r.Tags),
-		}
+		})
+		m.filteredIndices = append(m.filteredIndices, i)
 	}
 
-	tableHeight := m.height - 11 // padding(2) + title(1) + blank(1) + status(1) + actions(1) + help(2) + table border(2) + margin(1)
+	tableHeight := m.height - 12 // padding(2) + title(1) + blank(1) + status(1) + actions(1) + help(2) + table border(2) + margin(1) + filter(1)
 	if tableHeight < 3 {
 		tableHeight = 3
 	}
@@ -568,22 +578,39 @@ func (m listModel) update(msg tea.Msg) (listModel, tea.Cmd) {
 			return m, nil
 		}
 
+		// Filter input mode.
+		if m.filter.active {
+			var rebuild bool
+			m.filter, rebuild = m.filter.handleKey(msg)
+			if rebuild {
+				m = m.withRebuiltTable()
+			}
+			return m, nil
+		}
+
 		// Normal mode: ignore keys during an in-flight action.
 		if m.actionBusy {
 			return m, nil
 		}
 
 		switch msg.String() {
+		case "/":
+			m.filter.active = true
+			return m, nil
+		case "ctrl+u":
+			if m.filter.hasActiveFilter() {
+				m.filter.text = ""
+				m = m.withRebuiltTable()
+			}
+			return m, nil
 		case "enter":
-			if len(m.resources) == 0 {
+			r := m.selectedResource()
+			if r == nil {
 				return m, nil
 			}
-			cursor := m.table.Cursor()
-			if cursor >= 0 && cursor < len(m.resources) {
-				r := *m.resources[cursor]
-				return m, func() tea.Msg {
-					return resourceSelectedMsg{resource: r}
-				}
+			res := *r
+			return m, func() tea.Msg {
+				return resourceSelectedMsg{resource: res}
 			}
 		case "s":
 			if m.selectedResource() == nil {
@@ -684,7 +711,7 @@ func (m listModel) view() string {
 		return ""
 	}
 
-	title := StyleTitle.Render(fmt.Sprintf("Instances — %s", m.instName))
+	title := StyleTitle.Render(fmt.Sprintf("Resources — %s", m.instName))
 
 	if m.loading {
 		return lipgloss.NewStyle().Padding(1, 2).Render(
@@ -704,11 +731,23 @@ func (m listModel) view() string {
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
-	count := StyleDim.Render(fmt.Sprintf(" (%d)", len(m.resources)))
+	var count string
+	if m.filter.hasActiveFilter() {
+		count = StyleDim.Render(fmt.Sprintf(" (%d/%d)", len(m.filteredIndices), len(m.resources)))
+	} else {
+		count = StyleDim.Render(fmt.Sprintf(" (%d)", len(m.resources)))
+	}
 	lines := []string{
 		headerLine(title+count, m.width, m.lastRefreshed),
 		"",
 		m.table.View(),
+	}
+
+	// Filter line.
+	if fl := m.filter.renderLine(); fl != "" {
+		lines = append(lines, fl)
+	} else {
+		lines = append(lines, "")
 	}
 
 	// Status/spinner feedback line.
@@ -812,24 +851,30 @@ func (m listModel) view() string {
 		}
 		lines = append(lines, renderHelp("[↑/↓] navigate   [Enter] select   [Esc] cancel"))
 	default:
-		lines = append(lines, renderHelp("[s] start  [S] stop  [U] shutdown  [R] reboot  [c] clone  [D] delete  [T] template"))
-		lines = append(lines, renderHelp("[Alt+z] resize disk  [Alt+m] move disk"))
+		lines = append(lines, renderHelp("[s] start  [S] stop  [U] shutdown  [R] reboot  [c] clone  [D] delete  [T] template  |  [Tab] Users and Groups  |  [ctrl+r] refresh"))
+		lines = append(lines, renderHelp("[Alt+z] resize disk  [Alt+m] move disk  [/] filter"))
 	}
-
-	lines = append(lines, renderHelp("[Tab] users / backups  |  [ctrl+r] refresh"))
 	lines = append(lines, renderHelp("[Esc] back   [Q] quit"))
 	return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 }
 
+// clearFilter resets the filter and rebuilds the table to show all rows.
+func (m *listModel) clearFilter() {
+	if m.filter.hasActiveFilter() || m.filter.active {
+		m.filter.clear()
+		*m = m.withRebuiltTable()
+	}
+}
+
 func (m listModel) selectedResource() *proxmox.ClusterResource {
-	if len(m.resources) == 0 {
+	if len(m.filteredIndices) == 0 {
 		return nil
 	}
 	cursor := m.table.Cursor()
-	if cursor < 0 || cursor >= len(m.resources) {
+	if cursor < 0 || cursor >= len(m.filteredIndices) {
 		return nil
 	}
-	return m.resources[cursor]
+	return m.resources[m.filteredIndices[cursor]]
 }
 
 func (m listModel) listPowerCmd(action string) tea.Cmd {

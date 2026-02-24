@@ -102,8 +102,17 @@ func (m detailModel) view() string {
 }
 
 func (m detailModel) renderTabBar() string {
-	snapLabel := fmt.Sprintf("Snapshots (%d)", len(m.snapshots))
-	backupLabel := fmt.Sprintf("Backups (%d)", len(m.backups))
+	var snapLabel, backupLabel string
+	if m.snapFilter.hasActiveFilter() {
+		snapLabel = fmt.Sprintf("Snapshots (%d/%d)", len(m.filteredSnapIndices), len(m.snapshots))
+	} else {
+		snapLabel = fmt.Sprintf("Snapshots (%d)", len(m.snapshots))
+	}
+	if m.backupFilter.hasActiveFilter() {
+		backupLabel = fmt.Sprintf("Backups (%d/%d)", len(m.filteredBackupIndices), len(m.backups))
+	} else {
+		backupLabel = fmt.Sprintf("Backups (%d)", len(m.backups))
+	}
 
 	if m.activeTab == 0 {
 		return StyleTitle.Render(snapLabel) + "  " + StyleDim.Render(backupLabel) +
@@ -126,6 +135,12 @@ func (m detailModel) viewSnapshotsTab() []string {
 	default:
 		lines = append(lines, m.snapTable.View())
 	}
+	// Filter line.
+	if fl := m.snapFilter.renderLine(); fl != "" {
+		lines = append(lines, fl)
+	} else {
+		lines = append(lines, "")
+	}
 	return lines
 }
 
@@ -141,6 +156,12 @@ func (m detailModel) viewBackupsTab() []string {
 		lines = append(lines, StyleDim.Render("  No backups"))
 	default:
 		lines = append(lines, m.backupTable.View())
+	}
+	// Filter line.
+	if fl := m.backupFilter.renderLine(); fl != "" {
+		lines = append(lines, fl)
+	} else {
+		lines = append(lines, "")
 	}
 	return lines
 }
@@ -350,13 +371,13 @@ func (m detailModel) viewOverlay() []string {
 		lines = append(lines, "")
 		if m.activeTab == 0 {
 			if len(m.snapshots) > 0 {
-				lines = append(lines, renderHelp("[Alt+s] new  [Alt+d] delete  [Alt+r] rollback  |  [ctrl+r] refresh"))
+				lines = append(lines, renderHelp("[Alt+s] new  [Alt+d] delete  [Alt+r] rollback  [/] filter  |  [ctrl+r] refresh"))
 			} else {
 				lines = append(lines, renderHelp("[Alt+s] new snapshot"))
 			}
 		} else {
 			if len(m.backups) > 0 {
-				lines = append(lines, renderHelp("[Alt+b] backup  [Alt+d] delete  [Alt+r] restore  |  [ctrl+r] refresh"))
+				lines = append(lines, renderHelp("[Alt+b] backup  [Alt+d] delete  [Alt+r] restore  [/] filter  |  [ctrl+r] refresh"))
 			} else {
 				lines = append(lines, renderHelp("[Alt+b] new backup"))
 			}

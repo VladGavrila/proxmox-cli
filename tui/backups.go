@@ -21,9 +21,9 @@ type backupsScreenMode int
 
 const (
 	backupsScreenNormal         backupsScreenMode = iota
-	backupsScreenConfirmDel                        // confirm backup deletion
-	backupsScreenRestoreInput                      // VMID + name input (restoreField tracks active)
-	backupsScreenRestoreStorage                    // storage picker for restore target
+	backupsScreenConfirmDel                       // confirm backup deletion
+	backupsScreenRestoreInput                     // VMID + name input (restoreField tracks active)
+	backupsScreenRestoreStorage                   // storage picker for restore target
 )
 
 // backupsFetchedMsg is sent when the async fetch of all cluster backups completes.
@@ -64,12 +64,12 @@ type backupsScreenModel struct {
 	fetchID  int64
 
 	// Restore state
-	restoreIDInput   textinput.Model
-	restoreNameInput textinput.Model
-	restoreField     int // 0 = VMID, 1 = name
-	pendingVolid     string
-	pendingNode      string
-	pendingType      string // "qemu" or "lxc"
+	restoreIDInput     textinput.Model
+	restoreNameInput   textinput.Model
+	restoreField       int // 0 = VMID, 1 = name
+	pendingVolid       string
+	pendingNode        string
+	pendingType        string // "qemu" or "lxc"
 	pendingRestoreID   int
 	pendingRestoreName string
 	availableStorages  []storageChoice
@@ -79,6 +79,10 @@ type backupsScreenModel struct {
 	statusMsg     string
 	statusErr     bool
 	lastRefreshed time.Time
+
+	// Filter state
+	filter          tableFilter
+	filteredIndices []int // maps table row index → m.backups index
 
 	width  int
 	height int
@@ -133,19 +137,24 @@ func (m backupsScreenModel) withRebuiltTable() backupsScreenModel {
 		{Title: "NOTES", Width: 20},
 	}
 
-	rows := make([]table.Row, len(m.backups))
+	var rows []table.Row
+	m.filteredIndices = nil
 	for i, b := range m.backups {
 		typeStr := "VM"
 		if b.Type == "lxc" {
 			typeStr = "CT"
 		}
-		rows[i] = table.Row{b.Volid, b.VMID, typeStr, b.Size, b.Date, b.Notes}
+		if !m.filter.matches(b.Volid, b.VMID, typeStr, b.Notes) {
+			continue
+		}
+		rows = append(rows, table.Row{b.Volid, b.VMID, typeStr, b.Size, b.Date, b.Notes})
+		m.filteredIndices = append(m.filteredIndices, i)
 	}
 
 	// Reserve space for: padding(2) + header(1) + blank(1) + status(1)
 	// + overlay worst-case: blank(1) + title(1) + VMID(1) + Name(1) + help(1)
-	// + [Esc] back(1) = 11, plus table header border(2) = 13
-	tableHeight := m.height - 13
+	// + [Esc] back(1) = 11, plus table header border(2) = 13 + filter(1) = 14
+	tableHeight := m.height - 14
 	if tableHeight < 3 {
 		tableHeight = 3
 	}
@@ -265,14 +274,10 @@ func (m backupsScreenModel) update(msg tea.Msg) (backupsScreenModel, tea.Cmd) {
 			switch msg.String() {
 			case "enter":
 				m.mode = backupsScreenNormal
-				if len(m.backups) == 0 {
+				b := m.selectedBackup()
+				if b == nil {
 					return m, nil
 				}
-				cursor := m.table.Cursor()
-				if cursor < 0 || cursor >= len(m.backups) {
-					return m, nil
-				}
-				b := m.backups[cursor]
 				m.actionBusy = true
 				m.statusMsg = "Deleting backup..."
 				m.statusErr = false
@@ -373,12 +378,31 @@ func (m backupsScreenModel) update(msg tea.Msg) (backupsScreenModel, tea.Cmd) {
 			return m, nil
 		}
 
+		// Filter input mode.
+		if m.filter.active {
+			var rebuild bool
+			m.filter, rebuild = m.filter.handleKey(msg)
+			if rebuild {
+				m = m.withRebuiltTable()
+			}
+			return m, nil
+		}
+
 		// Normal mode: ignore keys during an in-flight action.
 		if m.actionBusy {
 			return m, nil
 		}
 
 		switch msg.String() {
+		case "/":
+			m.filter.active = true
+			return m, nil
+		case "ctrl+u":
+			if m.filter.hasActiveFilter() {
+				m.filter.text = ""
+				m = m.withRebuiltTable()
+			}
+			return m, nil
 		case "alt+d", "∂":
 			if len(m.backups) == 0 {
 				return m, nil
@@ -386,14 +410,10 @@ func (m backupsScreenModel) update(msg tea.Msg) (backupsScreenModel, tea.Cmd) {
 			m.mode = backupsScreenConfirmDel
 			return m, nil
 		case "alt+r", "®":
-			if len(m.backups) == 0 {
+			b := m.selectedBackup()
+			if b == nil {
 				return m, nil
 			}
-			cursor := m.table.Cursor()
-			if cursor < 0 || cursor >= len(m.backups) {
-				return m, nil
-			}
-			b := m.backups[cursor]
 			m.pendingVolid = b.Volid
 			m.pendingNode = b.Node
 			m.pendingType = b.Type
@@ -438,12 +458,24 @@ func (m backupsScreenModel) view() string {
 		return lipgloss.NewStyle().Padding(1, 2).Render(strings.Join(lines, "\n"))
 	}
 
-	count := StyleDim.Render(fmt.Sprintf(" (%d)", len(m.backups)))
+	var count string
+	if m.filter.hasActiveFilter() {
+		count = StyleDim.Render(fmt.Sprintf(" (%d/%d)", len(m.filteredIndices), len(m.backups)))
+	} else {
+		count = StyleDim.Render(fmt.Sprintf(" (%d)", len(m.backups)))
+	}
 
 	var lines []string
 	lines = append(lines, headerLine(title+count, m.width, m.lastRefreshed))
 	lines = append(lines, "")
 	lines = append(lines, m.table.View())
+
+	// Filter line.
+	if fl := m.filter.renderLine(); fl != "" {
+		lines = append(lines, fl)
+	} else {
+		lines = append(lines, "")
+	}
 
 	// Status/spinner feedback line.
 	switch {
@@ -471,9 +503,8 @@ func (m backupsScreenModel) viewOverlay() []string {
 	switch m.mode {
 	case backupsScreenConfirmDel:
 		volid := ""
-		cursor := m.table.Cursor()
-		if cursor >= 0 && cursor < len(m.backups) {
-			volid = m.backups[cursor].Volid
+		if b := m.selectedBackup(); b != nil {
+			volid = b.Volid
 		}
 		lines = append(lines, "")
 		lines = append(lines, StyleWarning.Render(
@@ -513,13 +544,32 @@ func (m backupsScreenModel) viewOverlay() []string {
 	default:
 		lines = append(lines, "")
 		if len(m.backups) > 0 {
-			lines = append(lines, renderHelp("[Alt+d] delete  [Alt+r] restore  |  [Tab] list  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[Alt+d] delete  [Alt+r] restore  [/] filter  |  [Tab] Resources  |  [ctrl+r] refresh"))
 		} else {
-			lines = append(lines, renderHelp("[Tab] list  |  [ctrl+r] refresh"))
+			lines = append(lines, renderHelp("[Tab] Resources  |  [ctrl+r] refresh"))
 		}
 	}
 
 	return lines
+}
+
+// clearFilter resets the filter and rebuilds the table to show all rows.
+func (m *backupsScreenModel) clearFilter() {
+	if m.filter.hasActiveFilter() || m.filter.active {
+		m.filter.clear()
+		*m = m.withRebuiltTable()
+	}
+}
+
+func (m backupsScreenModel) selectedBackup() *backupEntry {
+	if len(m.filteredIndices) == 0 {
+		return nil
+	}
+	cursor := m.table.Cursor()
+	if cursor < 0 || cursor >= len(m.filteredIndices) {
+		return nil
+	}
+	return &m.backups[m.filteredIndices[cursor]]
 }
 
 func fetchAllClusterBackups(c *proxmox.Client, fetchID int64) tea.Cmd {

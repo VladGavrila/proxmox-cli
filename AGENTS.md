@@ -21,6 +21,7 @@ pxve/
 │   ├── node.go                      # node list/info
 │   ├── cluster.go                   # cluster status/resources/tasks
 │   ├── user.go                      # user list/create/delete/password/grant/revoke/token
+│   ├── group.go                     # group list/create/delete/show/add-member/remove-member
 │   ├── access.go                    # acl list; role list
 │   └── output.go                    # watchTask(), formatBytes(), formatUptime(), formatCPUPercent(), selectFromList(), normalizeDiskSize()
 ├── tui/                             # Bubble Tea interactive TUI (launched via pxve --tui)
@@ -31,9 +32,10 @@ pxve/
 │   ├── detail.go                    # VM/CT detail: types, state machine, update()
 │   ├── detail_cmds.go               # All tea.Cmd closures for detail screen
 │   ├── detail_view.go               # Rendering — view(), tab views, overlays, formatUptime
-│   ├── users.go                     # Proxmox user list + inline create/delete
+│   ├── users.go                     # Proxmox user + group list with tabbed UI, inline CRUD, group membership
 │   ├── backups.go                   # Cluster-wide backup list + inline delete
 │   ├── userdetail.go                # User detail: tokens + ACLs, create/delete/grant/revoke
+│   ├── filter.go                    # Reusable tableFilter type for live filtering on any table screen
 │   └── styles.go                    # Shared lipgloss styles, headerLine(), CLISpinner
 ├── internal/
 │   ├── config/config.go             # Load/Save ~/.pxve.yaml via yaml.v3 (NOT viper)
@@ -46,7 +48,8 @@ pxve/
 │       ├── backup.go               # ListBackupStorages, ListBackups, CreateBackup, DeleteBackup, RestoreBackup, BackupConfig, NextID
 │       ├── node.go                  # ListNodes, GetNode
 │       ├── cluster.go               # GetCluster, ClusterResources, ClusterTasks
-│       └── access.go                # ListUsers/Tokens/ACLs/Roles, Create/Delete, Grant/Revoke
+│       ├── access.go                # ListUsers/Tokens/ACLs/Roles, Create/Delete, Grant/Revoke
+│       └── group.go                 # ListGroups, GetGroup, CreateGroup, DeleteGroup, AddUserToGroup, RemoveUserFromGroup
 └── dist/                            # Compiled binaries (git-ignored)
     ├── pxve-macos-arm64
     └── pxve-linux-amd64
@@ -143,6 +146,14 @@ pxve/
   - `VMAgentSetPassword(ctx, c, vmid, nodeName, username, password)` — sets a user's
     password inside the guest OS. Note the library signature is `(ctx, password, username)`
     — the action wraps this to use the more natural `(username, password)` order.
+- **Group actions** (`group.go`): `ListGroups(ctx, c)`, `GetGroup(ctx, c, groupid)`,
+  `CreateGroup(ctx, c, groupid, comment)`, `DeleteGroup(ctx, c, groupid)`,
+  `UpdateGroupComment(ctx, c, groupid, comment)`. Group membership is managed from the
+  user side: `AddUserToGroup(ctx, c, userid, groupid)` reads the user's current groups,
+  appends the new one, and writes back via `putUserGroups()`. `RemoveUserFromGroup` does the
+  reverse. `putUserGroups` uses a raw `c.Put()` to `/access/users/{userid}` because
+  go-proxmox's `UserOptions` tags `Groups` with `omitempty`, which drops the field when the
+  list is empty — preventing removal from the last group.
 - **Backup actions** (`backup.go`): `ListBackupStorages` filters storages by `backup`
   content type. `ListRestoreStorages` filters by `images` (qemu) or `rootdir` (lxc)
   content type — these are distinct because backup-capable storages (e.g. `local`)
@@ -271,7 +282,7 @@ per screen:
 |------------------|-------------------|------------------|--------------------------------------------------|
 | `screenSelector` | `selectorModel`   | `selector.go`    | Pick / add / remove / discover Proxmox instances |
 | `screenList`     | `listModel`       | `list.go`        | Table of all VMs + CTs, power actions, clone, delete, template |
-| `screenUsers`    | `usersModel`      | `users.go`       | Table of Proxmox users + create / delete          |
+| `screenUsers`    | `usersModel`      | `users.go`       | Tabbed Users + Groups view; user CRUD, group CRUD + membership |
 | `screenBackups`  | `backupsScreenModel` | `backups.go`  | Cluster-wide backup list + delete + restore        |
 | `screenDetail`   | `detailModel`     | `detail.go` / `detail_cmds.go` / `detail_view.go` | VM/CT info (incl. primary disk storage), power, clone, delete, template, resize/move disks, tags, snapshots, backups |
 | `screenUserDetail` | `userDetailModel` | `userdetail.go` | User info, token CRUD, ACL grant/revoke           |
@@ -282,7 +293,10 @@ per screen:
 Selector ──Enter──▸ List ──Enter──▸ Detail──▸ Esc
                      │ Tab
                      ▼
-                   Users ──Enter──▸ UserDetail──▸ Esc
+                  Users (tab) ──Enter──▸ UserDetail──▸ Esc
+                     │ Tab
+                     ▼
+                  Groups (tab) ──Enter──▸ Group detail overlay
                      │ Tab
                      ▼
                    Backups
@@ -291,9 +305,10 @@ Selector ──Enter──▸ List ──Enter──▸ Detail──▸ Esc
                     List
 ```
 
-- **Esc** goes back one screen (or dismisses an active dialog/overlay).
-- **Tab** cycles between List → Users → Backups → List.
-- **Q** / **Ctrl+C** quits (Q is passed through when a text input is active).
+- **Esc** goes back one screen (or dismisses an active dialog/overlay/filter).
+- **Tab** cycles between List → Users → Groups → Backups → List.
+- **Shift+Tab** cycles in reverse: List → Backups → Groups → Users → List.
+- **Q** / **Ctrl+C** quits (Q is passed through when a text input or filter is active).
 
 ### Key patterns
 
@@ -494,6 +509,65 @@ using `formatTagsCell()`: up to 2 tags joined by `, `, then `+N` for overflow.
 
 **CLI**: `pxve vm tag list/add/remove <vmid>` and `pxve ct tag list/add/remove <ctid>`
 call the same action layer functions.
+
+### Table Filtering
+
+All table screens support live filtering via `/` (slash). Pressing `/` activates an inline
+filter input. Typing narrows the visible rows to those containing the filter text
+(case-insensitive substring match across all displayed columns). `Esc` or `Enter` closes
+the input but keeps the filter applied. `Ctrl+U` clears the active filter text.
+
+**Implementation** (`tui/filter.go`): `tableFilter` is a reusable value type with fields
+`active bool` (input focused) and `text string` (persists after deactivation). Each
+screen/tab owns its own instance. The `matches(fields ...string)` method returns true if
+any field contains the filter text. When `handleKey` returns `rebuild=true`, the owning
+screen calls `withRebuiltTable()` to recompute visible rows.
+
+**Filtered index mapping**: Each screen maintains a `filteredIndices []int` slice that maps
+table row indices back to the original data slice. This is critical for actions like delete,
+enter, and restore — they must operate on the correct original item, not the filtered row
+index. All `selectedResource()` / `selectedBackup()` / `selectedSnapshotName()` helpers
+use this mapping.
+
+**Filter count display**: When a filter is active, the header count shows `(N/M)` where N
+is the number of matching rows and M is the total count.
+
+**Per-screen filters**:
+- `listModel`: single `filter` for the VM/CT resource table.
+- `backupsScreenModel`: single `filter` for the backup table.
+- `detailModel`: `snapFilter` and `backupFilter` (one per tab).
+- `usersModel`: `userFilter` and `groupFilter` (one per tab).
+- `userDetailModel`: `tokenFilter` and `aclFilter` (one per tab).
+
+**Router integration**: The router checks `filter.active` alongside mode checks before
+consuming `Q`, `Tab`, `Shift+Tab`, and `Esc` — an active filter input takes priority.
+Filters are cleared when switching screens via Tab/Shift+Tab.
+
+### Group Management (TUI)
+
+The **Users** screen has an internal tab bar with two tabs: **Users** and **Groups**.
+Tab cycles between them (Users → Groups → Backups screen). Shift+Tab reverses.
+The groups tab is rendered by `viewGroupsTab()` and keyed by `usersModel.groupsTab`.
+
+**Groups tab modes** (defined in `users.go`): `usersGroupNormal`, `usersGroupAdding`,
+`usersGroupConfirmDel`, `usersGroupDetail`, `usersGroupSelectMember`,
+`usersGroupAddMember`, `usersGroupConfirmRemoveMember`.
+
+**Flow**:
+1. Entering the Groups tab fetches groups via `fetchAllGroups` → `groupsFetchedMsg`.
+2. `[a]` opens the add-group form (group ID + comment). `[D]` confirms group deletion.
+3. `[Enter]` on a group opens the group detail overlay (`usersGroupDetail` mode) showing
+   the group name, comment, and member list with a cursor.
+4. In the detail overlay: `[a]` loads member candidates (`loadMemberCandidatesCmd` →
+   fetches all users, filters out existing members). If candidates exist, a picker
+   (`usersGroupSelectMember`) is shown; otherwise falls back to free text input
+   (`usersGroupAddMember`). `[d]` confirms removal of the cursor-selected member.
+5. Membership operations call `actions.AddUserToGroup` / `actions.RemoveUserFromGroup`,
+   which manage membership via the user's group list (Proxmox manages groups from the
+   user side).
+
+**CLI**: `pxve group list/create/delete/show/add-member/remove-member` (alias: `grp`).
+`create` accepts `--comment`. `delete` prompts for confirmation unless `--force` is passed.
 
 ### Guest Agent Info (QEMU VMs only)
 

@@ -241,6 +241,12 @@ type detailModel struct {
 	moveStorages   []storageChoice
 	moveStorageIdx int
 
+	// Filter state
+	snapFilter            tableFilter
+	backupFilter          tableFilter
+	filteredSnapIndices   []int // maps table row → m.snapshots index
+	filteredBackupIndices []int // maps table row → m.backups index
+
 	width  int
 	height int
 }
@@ -324,6 +330,7 @@ func (m detailModel) withRebuiltTable() detailModel {
 
 func (m detailModel) withRebuiltSnapTable() detailModel {
 	if len(m.snapshots) == 0 {
+		m.filteredSnapIndices = nil
 		return m
 	}
 
@@ -339,18 +346,23 @@ func (m detailModel) withRebuiltSnapTable() detailModel {
 		{Title: "DESCRIPTION", Width: descWidth},
 	}
 
-	rows := make([]table.Row, len(m.snapshots))
+	var rows []table.Row
+	m.filteredSnapIndices = nil
 	for i, s := range m.snapshots {
-		rows[i] = table.Row{s.Name, s.Date, s.Parent, s.Description}
+		if !m.snapFilter.matches(s.Name, s.Description) {
+			continue
+		}
+		rows = append(rows, table.Row{s.Name, s.Date, s.Parent, s.Description})
+		m.filteredSnapIndices = append(m.filteredSnapIndices, i)
 	}
 
 	// Fixed overhead lines in the detail view:
 	// padding(1) + title + stats + power + sep + statusMsg + tab bar + "Snapshots(N)" = 9
 	// help lines at bottom: snap actions + nav = 2
 	// table header is internal to bubbles/table (counts as 1 extra line)
-	// +1 for tab bar line
-	// Total non-table lines: ~14
-	tableHeight := m.height - 18
+	// +1 for tab bar line + 1 for filter line
+	// Total non-table lines: ~19
+	tableHeight := m.height - 19
 	if tableHeight < 3 {
 		tableHeight = 3
 	}
@@ -378,6 +390,7 @@ func (m detailModel) withRebuiltSnapTable() detailModel {
 
 func (m detailModel) withRebuiltBackupTable() detailModel {
 	if len(m.backups) == 0 {
+		m.filteredBackupIndices = nil
 		return m
 	}
 
@@ -392,12 +405,17 @@ func (m detailModel) withRebuiltBackupTable() detailModel {
 		{Title: "NOTES", Width: notesWidth},
 	}
 
-	rows := make([]table.Row, len(m.backups))
+	var rows []table.Row
+	m.filteredBackupIndices = nil
 	for i, b := range m.backups {
-		rows[i] = table.Row{b.Date, b.Size, b.Notes}
+		if !m.backupFilter.matches(b.Date, b.Notes) {
+			continue
+		}
+		rows = append(rows, table.Row{b.Date, b.Size, b.Notes})
+		m.filteredBackupIndices = append(m.filteredBackupIndices, i)
 	}
 
-	tableHeight := m.height - 18
+	tableHeight := m.height - 19
 	if tableHeight < 3 {
 		tableHeight = 3
 	}
@@ -757,23 +775,32 @@ func (m detailModel) update(msg tea.Msg) (detailModel, tea.Cmd) {
 }
 
 func (m detailModel) selectedSnapshotName() string {
-	if len(m.snapshots) == 0 {
+	if len(m.filteredSnapIndices) == 0 {
 		return ""
 	}
 	cursor := m.snapTable.Cursor()
-	if cursor < 0 || cursor >= len(m.snapshots) {
+	if cursor < 0 || cursor >= len(m.filteredSnapIndices) {
 		return ""
 	}
-	return m.snapshots[cursor].Name
+	return m.snapshots[m.filteredSnapIndices[cursor]].Name
 }
 
 func (m detailModel) selectedBackupInfo() (volid, storage string) {
-	if len(m.backups) == 0 {
+	if len(m.filteredBackupIndices) == 0 {
 		return "", ""
 	}
 	cursor := m.backupTable.Cursor()
-	if cursor < 0 || cursor >= len(m.backups) {
+	if cursor < 0 || cursor >= len(m.filteredBackupIndices) {
 		return "", ""
 	}
-	return m.backups[cursor].Volid, m.backups[cursor].Storage
+	b := m.backups[m.filteredBackupIndices[cursor]]
+	return b.Volid, b.Storage
+}
+
+// activeFilter returns the filter for the currently active tab.
+func (m detailModel) activeFilter() tableFilter {
+	if m.activeTab == 0 {
+		return m.snapFilter
+	}
+	return m.backupFilter
 }

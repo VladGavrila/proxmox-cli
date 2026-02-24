@@ -100,6 +100,9 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !a.users.loading && len(a.users.users) > 0 {
 			a.users = a.users.withRebuiltTable()
 		}
+		if !a.users.groupsLoading && len(a.users.groups) > 0 {
+			a.users = a.users.withRebuiltGroupTable()
+		}
 		if !a.backups.loading && len(a.backups.backups) > 0 {
 			a.backups = a.backups.withRebuiltTable()
 		}
@@ -157,37 +160,41 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 
 		case "Q":
-			// Let 'Q' pass through to sub-model when it's in a non-normal mode.
-			if a.screen == screenList && a.list.mode != listNormal {
+			// Let 'Q' pass through to sub-model when it's in a non-normal mode or filter is active.
+			if a.screen == screenList && (a.list.mode != listNormal || a.list.filter.active) {
 				break
 			}
-			if a.screen == screenDetail && a.detail.mode != detailNormal {
+			if a.screen == screenDetail && (a.detail.mode != detailNormal || a.detail.activeFilter().active) {
 				break
 			}
-			if a.screen == screenUserDetail && a.userDetail.mode != userDetailNormal {
+			if a.screen == screenUserDetail && (a.userDetail.mode != userDetailNormal || a.userDetail.activeFilter().active) {
 				break
 			}
 			if a.screen == screenSelector && a.selector.mode != selectorNormal {
 				break
 			}
-			if a.screen == screenUsers && a.users.mode != usersNormal {
+			if a.screen == screenUsers && (!a.users.isNormalMode() || a.users.activeFilter().active) {
 				break
 			}
-			if a.screen == screenBackups && a.backups.mode != backupsScreenNormal {
+			if a.screen == screenBackups && (a.backups.mode != backupsScreenNormal || a.backups.filter.active) {
 				break
 			}
 			return a, tea.Quit
 
 		case "tab":
-			// Don't switch screens when a sub-model is in a non-normal mode.
-			if a.screen == screenList && a.list.mode != listNormal {
+			// Don't switch screens when a sub-model is in a non-normal mode or filter is active.
+			if a.screen == screenList && (a.list.mode != listNormal || a.list.filter.active) {
 				break
 			}
-			if a.screen == screenBackups && a.backups.mode != backupsScreenNormal {
+			if a.screen == screenUsers && (!a.users.isNormalMode() || a.users.activeFilter().active) {
+				break
+			}
+			if a.screen == screenBackups && (a.backups.mode != backupsScreenNormal || a.backups.filter.active) {
 				break
 			}
 			switch a.screen {
 			case screenList:
+				a.list.clearFilter()
 				a.screen = screenUsers
 				if a.users.client == nil {
 					a.users = newUsersModel(a.list.client, a.list.instName, a.width, a.height)
@@ -195,6 +202,20 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, nil
 			case screenUsers:
+				if !a.users.groupsTab {
+					// Switch from users tab to groups tab (internal).
+					a.users.clearFilters()
+					a.users.groupsTab = true
+					a.users.statusMsg = ""
+					if a.users.groups == nil {
+						a.users.groupsLoading = true
+						return a, tea.Batch(fetchAllGroups(a.users.client), a.users.spinner.Tick)
+					}
+					return a, nil
+				}
+				// Switch from groups tab to backups screen.
+				a.users.clearFilters()
+				a.users.groupsTab = false
 				a.screen = screenBackups
 				if a.backups.client == nil {
 					a.backups = newBackupsScreenModel(a.list.client, a.list.instName, a.width, a.height)
@@ -202,6 +223,52 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, nil
 			case screenBackups:
+				a.backups.clearFilter()
+				a.screen = screenList
+				return a, nil
+			}
+
+		case "shift+tab":
+			if a.screen == screenList && (a.list.mode != listNormal || a.list.filter.active) {
+				break
+			}
+			if a.screen == screenUsers && (!a.users.isNormalMode() || a.users.activeFilter().active) {
+				break
+			}
+			if a.screen == screenBackups && (a.backups.mode != backupsScreenNormal || a.backups.filter.active) {
+				break
+			}
+			switch a.screen {
+			case screenList:
+				a.list.clearFilter()
+				a.screen = screenBackups
+				if a.backups.client == nil {
+					a.backups = newBackupsScreenModel(a.list.client, a.list.instName, a.width, a.height)
+					return a, a.backups.init()
+				}
+				return a, nil
+			case screenBackups:
+				a.backups.clearFilter()
+				a.screen = screenUsers
+				if a.users.client == nil {
+					a.users = newUsersModel(a.list.client, a.list.instName, a.width, a.height)
+					return a, a.users.init()
+				}
+				a.users.groupsTab = true
+				a.users.statusMsg = ""
+				if a.users.groups == nil {
+					a.users.groupsLoading = true
+					return a, tea.Batch(fetchAllGroups(a.users.client), a.users.spinner.Tick)
+				}
+				return a, nil
+			case screenUsers:
+				if a.users.groupsTab {
+					a.users.clearFilters()
+					a.users.groupsTab = false
+					a.users.statusMsg = ""
+					return a, nil
+				}
+				a.users.clearFilters()
 				a.screen = screenList
 				return a, nil
 			}
@@ -209,36 +276,42 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			switch a.screen {
 			case screenUserDetail:
-				if a.userDetail.mode != userDetailNormal {
-					break // let userDetail handle dialog dismissal
+				if a.userDetail.mode != userDetailNormal || a.userDetail.activeFilter().active {
+					break // let userDetail handle dialog/filter dismissal
 				}
 				a.screen = screenUsers
 				return a, nil
 			case screenDetail:
-				if a.detail.mode != detailNormal {
-					break // let detail handle dialog dismissal
+				if a.detail.mode != detailNormal || a.detail.activeFilter().active {
+					break // let detail handle dialog/filter dismissal
 				}
 				a.screen = screenList
 				return a, nil
 			case screenList:
-				if a.list.mode != listNormal {
-					break // let list handle dialog dismissal
+				if a.list.mode != listNormal || a.list.filter.active {
+					break // let list handle dialog/filter dismissal
 				}
+				a.list.clearFilter()
 				a.listCache[a.list.instName] = a.list
 				a.selector.current = a.list.instName
 				a.selector.table = a.selector.buildTable()
 				a.screen = screenSelector
 				return a, nil
 			case screenUsers:
+				if !a.users.isNormalMode() || a.users.activeFilter().active {
+					break // let users handle dialog/overlay/filter dismissal
+				}
+				a.users.clearFilters()
 				a.listCache[a.list.instName] = a.list
 				a.selector.current = a.list.instName
 				a.selector.table = a.selector.buildTable()
 				a.screen = screenSelector
 				return a, nil
 			case screenBackups:
-				if a.backups.mode != backupsScreenNormal {
-					break // let backups handle dialog dismissal
+				if a.backups.mode != backupsScreenNormal || a.backups.filter.active {
+					break // let backups handle dialog/filter dismissal
 				}
+				a.backups.clearFilter()
 				a.listCache[a.list.instName] = a.list
 				a.selector.current = a.list.instName
 				a.selector.table = a.selector.buildTable()
