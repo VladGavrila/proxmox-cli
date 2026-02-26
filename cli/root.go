@@ -10,11 +10,12 @@ import (
 	"github.com/chupakbra/proxmox-cli/internal/client"
 	"github.com/chupakbra/proxmox-cli/internal/config"
 	clierrors "github.com/chupakbra/proxmox-cli/internal/errors"
+	"github.com/chupakbra/proxmox-cli/internal/upgrade"
 	"github.com/chupakbra/proxmox-cli/tui"
 )
 
 // version is set at build time via -X github.com/chupakbra/proxmox-cli/cli.version=<ver>.
-var version = "1.7.1"
+var version = "1.8.0"
 
 var (
 	// global state resolved in PersistentPreRunE
@@ -32,6 +33,7 @@ var (
 	flagSecure      bool
 	flagOutput      string
 	flagTUI         bool
+	flagUpgrade     bool
 )
 
 // rootCmd is the base command.
@@ -49,6 +51,13 @@ Configure a Proxmox instance with:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Run: func(cmd *cobra.Command, args []string) {
+		if flagUpgrade {
+			if err := upgrade.Run(version); err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if flagTUI {
 			cfg, err := config.Load()
 			if err != nil {
@@ -71,6 +80,7 @@ func Execute() {
 
 	// Local flags (root command only)
 	rootCmd.Flags().BoolVar(&flagTUI, "tui", false, "launch interactive terminal UI")
+	rootCmd.Flags().BoolVar(&flagUpgrade, "upgrade", false, "upgrade pxve to the latest release")
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&flagInstance, "instance", "i", "", "named Proxmox instance from config (overrides current-instance)")
