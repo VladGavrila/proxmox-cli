@@ -63,7 +63,9 @@ type userDetailModel struct {
 	mode        userDetailMode
 
 	// Token creation input.
-	tokenInput textinput.Model
+	tokenInput  textinput.Model
+	tokenFocus  int  // 0=name, 1=privsep toggle
+	tokenPrivsep bool // default true; toggled with space
 
 	// Newly created token shown once.
 	newTokenID    string
@@ -106,14 +108,15 @@ func newUserDetailModel(c *proxmox.Client, info userInfo, w, h int) userDetailMo
 	}
 
 	return userDetailModel{
-		client:      c,
-		info:        info,
-		loading:     true,
-		spinner:     s,
-		tokenInput:  ti,
-		grantInputs: grantInputs,
-		width:       w,
-		height:      h,
+		client:       c,
+		info:         info,
+		loading:      true,
+		spinner:      s,
+		tokenInput:   ti,
+		tokenPrivsep: true,
+		grantInputs:  grantInputs,
+		width:        w,
+		height:       h,
 	}
 }
 
@@ -321,20 +324,45 @@ func (m userDetailModel) update(msg tea.Msg) (userDetailModel, tea.Cmd) {
 				m.mode = userDetailNormal
 				m.tokenInput.Reset()
 				m.tokenInput.Blur()
+				m.tokenFocus = 0
+				m.tokenPrivsep = true
 				return m, nil
 			case "enter":
+				if m.tokenFocus == 0 {
+					name := strings.TrimSpace(m.tokenInput.Value())
+					if name == "" {
+						return m, nil
+					}
+					m.tokenInput.Blur()
+					m.tokenFocus = 1
+					return m, nil
+				}
+				// tokenFocus == 1: submit.
 				name := strings.TrimSpace(m.tokenInput.Value())
+				privsep := m.tokenPrivsep
 				m.tokenInput.Reset()
 				m.tokenInput.Blur()
+				m.tokenFocus = 0
 				m.mode = userDetailNormal
 				if name == "" {
 					return m, nil
 				}
-				return m, m.createTokenCmd(name)
-			default:
+				return m, m.createTokenCmd(name, privsep)
+			case " ":
+				if m.tokenFocus == 1 {
+					m.tokenPrivsep = !m.tokenPrivsep
+					return m, nil
+				}
 				var cmd tea.Cmd
 				m.tokenInput, cmd = m.tokenInput.Update(msg)
 				return m, cmd
+			default:
+				if m.tokenFocus == 0 {
+					var cmd tea.Cmd
+					m.tokenInput, cmd = m.tokenInput.Update(msg)
+					return m, cmd
+				}
+				return m, nil
 			}
 		}
 
@@ -460,6 +488,8 @@ func (m userDetailModel) update(msg tea.Msg) (userDetailModel, tea.Cmd) {
 		case "t":
 			if m.activeTab == 0 {
 				m.mode = userDetailInputToken
+				m.tokenFocus = 0
+				m.tokenPrivsep = true
 				m.tokenInput.Focus()
 				return m, textinput.Blink
 			}
@@ -611,8 +641,22 @@ func (m userDetailModel) view() string {
 		switch m.mode {
 		case userDetailInputToken:
 			lines = append(lines, "")
-			lines = append(lines, StyleWarning.Render("New token name: ")+m.tokenInput.View())
-			lines = append(lines, renderHelp("[Enter] create   [Esc] cancel"))
+			if m.tokenFocus == 0 {
+				lines = append(lines, StyleWarning.Render("  Name:    ")+m.tokenInput.View())
+			} else {
+				lines = append(lines, StyleDim.Render("  Name:    ")+m.tokenInput.View())
+			}
+			checkbox := "[ ] no"
+			if m.tokenPrivsep {
+				checkbox = "[x] yes"
+			}
+			if m.tokenFocus == 1 {
+				lines = append(lines, StyleWarning.Render("  Privsep: ")+StyleWarning.Render(checkbox))
+				lines = append(lines, renderHelp("[Space] toggle   [Enter] create   [Esc] cancel"))
+			} else {
+				lines = append(lines, StyleDim.Render("  Privsep: ")+checkbox)
+				lines = append(lines, renderHelp("[Enter] next   [Esc] cancel"))
+			}
 		case userDetailConfirmDeleteToken:
 			cursor := m.tokensTable.Cursor()
 			name := ""
@@ -716,14 +760,14 @@ func formatTokenExpire(expire int) string {
 	return time.Unix(int64(expire), 0).Format("2006-01-02")
 }
 
-func (m userDetailModel) createTokenCmd(tokenID string) tea.Cmd {
+func (m userDetailModel) createTokenCmd(tokenID string, privsep bool) tea.Cmd {
 	c := m.client
 	userid := m.info.UserID
 	return func() tea.Msg {
 		ctx := context.Background()
 		tok := proxmox.Token{
 			TokenID: tokenID,
-			Privsep: proxmox.IntOrBool(false),
+			Privsep: proxmox.IntOrBool(privsep),
 		}
 		newTok, err := actions.CreateToken(ctx, c, userid, tok)
 		if err != nil {
@@ -755,7 +799,7 @@ func (m userDetailModel) grantCmd(path, role string) tea.Cmd {
 	userid := m.info.UserID
 	return func() tea.Msg {
 		ctx := context.Background()
-		if err := actions.GrantAccessByPath(ctx, c, userid, path, role, false); err != nil {
+		if err := actions.GrantAccessByPath(ctx, c, userid, path, role, true); err != nil {
 			return userDetailActionMsg{err: err}
 		}
 		return userDetailActionMsg{

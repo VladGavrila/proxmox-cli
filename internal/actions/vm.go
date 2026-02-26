@@ -96,13 +96,18 @@ func RebootVM(ctx context.Context, c *proxmox.Client, vmid int, nodeName string)
 	return vm.Reboot(ctx)
 }
 
-// VMSnapshots returns the list of snapshots for a VM.
+// VMSnapshots returns the list of snapshots for a VM, sorted newest first.
 func VMSnapshots(ctx context.Context, c *proxmox.Client, vmid int, nodeName string) ([]*proxmox.Snapshot, error) {
 	vm, err := FindVM(ctx, c, vmid, nodeName)
 	if err != nil {
 		return nil, err
 	}
-	return vm.Snapshots(ctx)
+	snaps, err := vm.Snapshots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].Snaptime > snaps[j].Snaptime })
+	return snaps, nil
 }
 
 // CreateVMSnapshot creates a snapshot for a VM and returns the task.

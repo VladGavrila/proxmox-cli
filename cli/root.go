@@ -14,7 +14,7 @@ import (
 )
 
 // version is set at build time via -X github.com/chupakbra/proxmox-cli/cli.version=<ver>.
-var version = "1.6.0"
+var version = "1.7.1"
 
 var (
 	// global state resolved in PersistentPreRunE

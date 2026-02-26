@@ -87,13 +87,18 @@ func RebootContainer(ctx context.Context, c *proxmox.Client, ctid int, nodeName 
 	return ct.Reboot(ctx)
 }
 
-// ContainerSnapshots returns the list of snapshots for a container.
+// ContainerSnapshots returns the list of snapshots for a container, sorted newest first.
 func ContainerSnapshots(ctx context.Context, c *proxmox.Client, ctid int, nodeName string) ([]*proxmox.ContainerSnapshot, error) {
 	ct, err := FindContainer(ctx, c, ctid, nodeName)
 	if err != nil {
 		return nil, err
 	}
-	return ct.Snapshots(ctx)
+	snaps, err := ct.Snapshots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].SnapshotCreationTime > snaps[j].SnapshotCreationTime })
+	return snaps, nil
 }
 
 // CreateContainerSnapshot creates a snapshot for a container and returns the task.
