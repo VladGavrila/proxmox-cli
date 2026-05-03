@@ -3,6 +3,28 @@
 A command-line tool for managing Proxmox VE infrastructure — virtual machines,
 containers, nodes, users, and access control.
 
+## Installation
+
+Download a pre-built binary from the [Releases](https://github.com/VladGavrila/proxmox-cli/releases) page
+* The `.zip` artifact is signed and does not need removing the quarantine flag
+
+### macOS
+#### move to a folder in $PATH and make executable
+
+```bash
+mv ~/Downloads/pxve-macos-arm64 ~/.local/bin/pxve
+chmod +x ~/.local/bin/pxve
+```
+
+#### removing the quarantine flag
+macOS Gatekeeper will block unsigned binaries downloaded from the internet. Remove the quarantine attribute:
+
+```bash
+xattr -c ~/.local/bin/pxve
+```
+
+You only need to do this once after downloading.
+
 ## Features
 
 - **VMs & containers** — list, start, stop, reboot, shutdown, clone, delete, snapshots, convert to template, disk resize, disk move, tag management
